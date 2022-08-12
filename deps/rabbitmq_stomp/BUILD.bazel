@@ -1,16 +1,15 @@
-load("@rules_erlang//:erlc.bzl", "erlc")
-load("@rules_erlang//:xref.bzl", "xref")
+load("@rules_erlang//:xref2.bzl", "xref")
 load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
 load(
     "//:rabbitmq.bzl",
     "BROKER_VERSION_REQUIREMENTS_ANY",
     "RABBITMQ_DIALYZER_OPTS",
-    "RABBITMQ_TEST_ERLC_OPTS",
     "assert_suites",
     "broker_for_integration_suites",
     "rabbitmq_app",
     "rabbitmq_integration_suite",
     "rabbitmq_suite",
+    "rabbitmq_test_helper",
 )
 
 APP_NAME = "rabbitmq_stomp"
@@ -66,7 +65,9 @@ rabbitmq_app(
     deps = DEPS,
 )
 
-xref(tags = ["xref"])
+xref(
+    additional_libs = BUILD_DEPS,
+)
 
 plt(
     name = "base_plt",
@@ -76,7 +77,6 @@ plt(
 dialyze(
     dialyzer_opts = RABBITMQ_DIALYZER_OPTS + ["-Wno_undefined_callbacks"],
     plt = ":base_plt",
-    tags = ["dialyze"],
     warnings_as_errors = False,
 )
 
@@ -84,9 +84,8 @@ broker_for_integration_suites()
 
 PACKAGE = "deps/rabbitmq_stomp"
 
-erlc(
+rabbitmq_test_helper(
     name = "rabbit_stomp_client",
-    testonly = True,
     srcs = [
         "test/src/rabbit_stomp_client.erl",
     ],
@@ -94,8 +93,6 @@ erlc(
         "include/**/*.hrl",
         "src/**/*.hrl",
     ]),
-    dest = "test",
-    erlc_opts = RABBITMQ_TEST_ERLC_OPTS,
     deps = [
         ":test_erlang_app",
     ],

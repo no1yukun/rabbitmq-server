@@ -1,28 +1,31 @@
+load("@bazel_skylib//rules:select_file.bzl", "select_file")
 load(":rabbitmqctl.bzl", "rabbitmqctl")
 load(":rabbitmqctl_test.bzl", "rabbitmqctl_test")
-load(":elixir.bzl", "elixir")
 load("//:rabbitmq_home.bzl", "rabbitmq_home")
 load("//:rabbitmq_run.bzl", "rabbitmq_run")
 load("//:rabbitmq.bzl", "STARTS_BACKGROUND_BROKER_TAG")
 
-# This rule simply exposes elixir as a runtime lib for tests in erlang
-elixir(
-    name = "elixir_app",
-    visibility = ["//visibility:public"],
-)
-
 # Note: All the various rabbitmq-* scripts are just copies of rabbitmqctl
 rabbitmqctl(
     name = "rabbitmqctl",
-    srcs = glob([
+    srcs = [
         "mix.exs",
         "config/config.exs",
+    ] + glob([
         "lib/**/*.ex",
     ]),
+    license_files = glob(["LICENSE*"]),
     visibility = ["//visibility:public"],
     deps = [
         "//deps/rabbit_common:erlang_app",
     ],
+)
+
+select_file(
+    name = "fetched_srcs",
+    srcs = ":rabbitmqctl",
+    subpath = "deps.tar",
+    visibility = ["//visibility:public"],
 )
 
 rabbitmq_home(
@@ -46,9 +49,10 @@ rabbitmq_run(
 rabbitmqctl_test(
     name = "rabbitmqctl_tests",
     size = "large",
-    srcs = glob([
+    srcs = [
         "mix.exs",
         "config/config.exs",
+    ] + glob([
         "lib/**/*.ex",
         "test/**/*.exs",
     ]),

@@ -1,7 +1,17 @@
-load("@rules_erlang//:erlang_home.bzl", "ErlangHomeProvider", "ErlangVersionProvider")
-load("@rules_erlang//:util.bzl", "path_join", "windows_path")
-load("@rules_erlang//:ct.bzl", "sanitize_sname")
-load(":rabbitmq_home.bzl", "RabbitmqHomeInfo", "rabbitmq_home_short_path")
+load(
+    "@rules_erlang//:util.bzl",
+    "path_join",
+    "windows_path",
+)
+load(
+    "@rules_erlang//tools:erlang_toolchain.bzl",
+    "erlang_dirs",
+)
+load(
+    ":rabbitmq_home.bzl",
+    "RabbitmqHomeInfo",
+    "rabbitmq_home_short_path",
+)
 
 def _impl(ctx):
     rabbitmq_home_path = rabbitmq_home_short_path(ctx.attr.home)
@@ -11,7 +21,7 @@ def _impl(ctx):
         path_join(rabbitmq_home_path, "plugins"),
     ])
 
-    sname = sanitize_sname("sbb-" + ctx.attr.name)
+    (erlang_home, _, runfiles) = erlang_dirs(ctx)
 
     if not ctx.attr.is_windows:
         output = ctx.actions.declare_file(ctx.label.name)
@@ -21,8 +31,7 @@ def _impl(ctx):
             substitutions = {
                 "{RABBITMQ_HOME}": rabbitmq_home_path,
                 "{ERL_LIBS}": erl_libs,
-                "{ERLANG_HOME}": ctx.attr._erlang_home[ErlangHomeProvider].path,
-                "{SNAME}": sname,
+                "{ERLANG_HOME}": erlang_home,
             },
             is_executable = True,
         )
@@ -34,13 +43,12 @@ def _impl(ctx):
             substitutions = {
                 "{RABBITMQ_HOME}": windows_path(rabbitmq_home_path),
                 "{ERL_LIBS}": erl_libs,
-                "{ERLANG_HOME}": windows_path(ctx.attr._erlang_home[ErlangHomeProvider].path),
-                "{SNAME}": sname,
+                "{ERLANG_HOME}": windows_path(erlang_home),
             },
             is_executable = True,
         )
 
-    runfiles = ctx.runfiles(ctx.attr.home[DefaultInfo].files.to_list())
+    runfiles = runfiles.merge(ctx.runfiles(ctx.attr.home[DefaultInfo].files.to_list()))
 
     return [DefaultInfo(
         runfiles = runfiles,
@@ -58,10 +66,10 @@ rabbitmq_run_private = rule(
             default = Label("//:scripts/bazel/rabbitmq-run.bat"),
             allow_single_file = True,
         ),
-        "_erlang_home": attr.label(default = Label("@rules_erlang//:erlang_home")),
         "is_windows": attr.bool(mandatory = True),
         "home": attr.label(providers = [RabbitmqHomeInfo]),
     },
+    toolchains = ["@rules_erlang//tools:toolchain_type"],
     executable = True,
 )
 
@@ -117,6 +125,8 @@ rabbitmq_run_command_private = rule(
             "run-broker",
             "start-background-broker",
             "stop-node",
+            "start-cluster",
+            "stop-cluster",
         ]),
     },
     executable = True,

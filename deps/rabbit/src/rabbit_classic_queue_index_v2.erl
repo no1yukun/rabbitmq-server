@@ -323,9 +323,6 @@ recover_segments(State0, ContainsCheckFun, StoreState0, CountersRef, [Segment|Ta
         {ok, <<?MAGIC:32,?VERSION:8,
                _FromSeqId:64/unsigned,_ToSeqId:64/unsigned,
                _/bits>>} ->
-            %% Double check the file size before attempting to parse it.
-            SegmentFileSize = ?HEADER_SIZE + SegmentEntryCount * ?ENTRY_SIZE,
-            {ok, #file_info{size = SegmentFileSize}} = file:read_file_info(Fd),
             {Action, State, StoreState1} = recover_segment(State0, ContainsCheckFun, StoreState0, CountersRef, Fd,
                                                           Segment, 0, SegmentEntryCount,
                                                           SegmentEntryCount, []),
@@ -334,7 +331,7 @@ recover_segments(State0, ContainsCheckFun, StoreState0, CountersRef, [Segment|Ta
                 keep ->
                     StoreState1;
                 delete ->
-                    _ = file:delete(SegmentFile),
+                    _ = prim_file:delete(SegmentFile),
                     rabbit_classic_queue_store_v2:delete_segments([Segment], StoreState1)
             end,
             recover_segments(State, ContainsCheckFun, StoreState, CountersRef, Tail);
@@ -344,7 +341,7 @@ recover_segments(State0, ContainsCheckFun, StoreState0, CountersRef, [Segment|Ta
             rabbit_log:warning("Deleting invalid v2 segment file ~s (file has invalid header)",
                                [SegmentFile]),
             ok = file:close(Fd),
-            _ = file:delete(SegmentFile),
+            _ = prim_file:delete(SegmentFile),
             StoreState = rabbit_classic_queue_store_v2:delete_segments([Segment], StoreState0),
             recover_segments(State0, ContainsCheckFun, StoreState, CountersRef, Tail)
     end.
@@ -436,7 +433,13 @@ recover_segment(State, ContainsCheckFun, StoreState0, CountersRef, Fd,
         {ok, << 0:8, _/bits >>} ->
             recover_segment(State, ContainsCheckFun, StoreState0, CountersRef,
                             Fd, Segment, ThisEntry + 1, SegmentEntryCount,
-                            Unacked - 1, LocBytes0)
+                            Unacked - 1, LocBytes0);
+        %% We reached the end of a partial file. There are no more entries.
+        %% We skip ThisEntry to SegmentEntryCount to reach the final clause.
+        eof ->
+            recover_segment(State, ContainsCheckFun, StoreState0, CountersRef,
+                            Fd, Segment, SegmentEntryCount, SegmentEntryCount,
+                            Unacked - (SegmentEntryCount - ThisEntry), LocBytes0)
     end.
 
 recover_index_v1_clean(State0 = #qi{ queue_name = Name }, Terms, IsMsgStoreClean,
@@ -587,23 +590,6 @@ new_segment_file(Segment, SegmentEntryCount, State = #qi{ segments = Segments })
     #qi{ fds = OpenFds } = reduce_fd_usage(Segment, State),
     false = maps:is_key(Segment, OpenFds), %% assert
     {ok, Fd} = file:open(segment_file(Segment, State), [read, write, raw, binary]),
-    %% We must preallocate space for the file. We want the space
-    %% to be allocated to not have to worry about errors when
-    %% writing later on.
-    Size = ?HEADER_SIZE + SegmentEntryCount * ?ENTRY_SIZE,
-    case file:allocate(Fd, 0, Size) of
-        ok ->
-            ok;
-        %% On some platforms file:allocate is not supported (e.g. Windows).
-        %% In that case we fill the file with zeroes manually.
-        {error, enotsup} ->
-            ok = file:write(Fd, <<0:Size/unit:8>>),
-            {ok, 0} = file:position(Fd, bof),
-            %% We do a full GC immediately after because we do not want
-            %% to keep around the large binary we used to fill the file.
-            _ = garbage_collect(),
-            ok
-    end,
     %% We then write the segment file header. It contains
     %% some useful info and some reserved bytes for future use.
     %% We currently do not make use of this information. It is
@@ -875,7 +861,7 @@ delete_segment(Segment, State0 = #qi{ fds = OpenFds0 }) ->
             State0
     end,
     %% Then we can delete the segment file.
-    case file:delete(segment_file(Segment, State)) of
+    case prim_file:delete(segment_file(Segment, State)) of
         ok -> ok;
         %% It's possible that the file already does not exist:
         %% following a crash, and due to rabbit_variable_queue's
@@ -984,11 +970,20 @@ read_from_disk(SeqIdsToRead0, State0 = #qi{ write_buffer = WriteBuffer }, Acc0) 
     case get_fd(FirstSeqId, State0) of
         {Fd, OffsetForSeqId, State} ->
             file_handle_cache_stats:update(queue_index_read),
-            {ok, EntriesBin} = file:pread(Fd, OffsetForSeqId, ReadSize),
-            %% We cons new entries into the Acc and only reverse it when we
-            %% are completely done reading new entries.
-            Acc = parse_entries(EntriesBin, FirstSeqId, WriteBuffer, Acc0),
-            read_from_disk(SeqIdsToRead, State, Acc);
+            %% When reading further than the end of a partial file,
+            %% file:pread/3 will return what it could read.
+            case file:pread(Fd, OffsetForSeqId, ReadSize) of
+                {ok, EntriesBin} ->
+                    %% We cons new entries into the Acc and only reverse it when we
+                    %% are completely done reading new entries.
+                    Acc = parse_entries(EntriesBin, FirstSeqId, WriteBuffer, Acc0),
+                    read_from_disk(SeqIdsToRead, State, Acc);
+                eof ->
+                    %% We reached the end of a partial file.
+                    %% Everything past that point is non-existent.
+                    %% This probably does not happen outside of tests.
+                    read_from_disk(SeqIdsToRead, State, Acc0)
+            end;
         %% The segment file no longer exists. This is equivalent to a file
         %% where all entries are non-existent/acked. This can happen after
         %% a crash due to rabbit_variable_queue's understanding of bounds.
@@ -1132,7 +1127,7 @@ queue_index_walker_reader(#resource{ virtual_host = VHost } = Name, Gatherer) ->
     _ = [queue_index_walker_segment(filename:join(Dir, F), Gatherer) || F <- SegmentFiles],
     %% When there are files belonging to the v1 index, we go through
     %% the v1 index walker function as well.
-    case rabbit_file:wildcard(".*\\.idx", Dir) of
+    case rabbit_file:wildcard(".*\\.(idx|jif)", Dir) of
         [_|_] ->
             %% This function will call gatherer:finish/1, we do not
             %% need to call it here.
@@ -1166,7 +1161,10 @@ queue_index_walker_segment(Fd, Gatherer, N, Total) ->
             queue_index_walker_segment(Fd, Gatherer, N + 1, Total);
         %% We found an ack, a transient entry or a non-entry. Skip it.
         {ok, _} ->
-            queue_index_walker_segment(Fd, Gatherer, N + 1, Total)
+            queue_index_walker_segment(Fd, Gatherer, N + 1, Total);
+        %% We reached the end of a partial segment file.
+        eof ->
+            ok
     end.
 
 stop(VHost) ->

@@ -23,11 +23,15 @@
 -define(COMMAND_HEARTBEAT, 23).
 -define(COMMAND_ROUTE, 24).
 -define(COMMAND_PARTITIONS, 25).
+-define(COMMAND_CONSUMER_UPDATE, 26).
+-define(COMMAND_EXCHANGE_COMMAND_VERSIONS, 27).
+-define(COMMAND_STREAM_STATS, 28).
 
 -define(REQUEST, 0).
 -define(RESPONSE, 1).
 
 -define(VERSION_1, 1).
+-define(VERSION_2, 2).
 
 -define(RESPONSE_CODE_OK, 1).
 -define(RESPONSE_CODE_STREAM_DOES_NOT_EXIST, 2).
@@ -50,6 +54,7 @@
 -define(RESPONSE_CODE_NO_OFFSET, 19).
 
 
+-define(OFFSET_TYPE_NONE, 0).
 -define(OFFSET_TYPE_FIRST, 1).
 -define(OFFSET_TYPE_LAST, 2).
 -define(OFFSET_TYPE_NEXT, 3).
@@ -96,6 +101,8 @@
   offset,
   offset_lag,
   credits,
+  active,
+  activity_status,
   properties
   ]).
 
@@ -108,5 +115,18 @@
   messages_confirmed,
   messages_errored
   ]).
+
+-define(CONSUMER_GROUP_INFO_ITEMS, [
+  stream,
+  reference,
+  partition_index,
+  consumers
+  ]).
+
+-define(GROUP_CONSUMER_INFO_ITEMS, [
+  subscription_id,
+  connection_name,
+  state
+]).
 
 -define(STREAM_GUIDE_URL, <<"https://rabbitmq.com/stream.html">>).

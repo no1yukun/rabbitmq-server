@@ -7,10 +7,6 @@
 
 -module(rabbit_amqp1_0_reader).
 
-%% Transitional step until we can require Erlang/OTP 21 and
-%% use the now recommended try/catch syntax for obtaining the stack trace.
--compile(nowarn_deprecated_function).
-
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_framing.hrl").
 -include_lib("kernel/include/inet.hrl").
@@ -675,6 +671,9 @@ auth_phase_1_0(Response,
         {ok, User = #user{username = Username}} ->
             case rabbit_access_control:check_user_loopback(Username, Sock) of
                 ok ->
+                    rabbit_log_connection:info(
+                        "AMQP 1.0 connection ~p: user '~s' authenticated",
+                        [self(), Username]),
                     rabbit_core_metrics:auth_attempt_succeeded(<<>>, Username, amqp10),
                     ok;
                 not_allowed ->
@@ -713,6 +712,10 @@ send_to_new_1_0_session(Channel, Frame, State) ->
             put({channel, Channel}, {ch_fr_pid, ChFrPid}),
             put({ch_sup_pid, ChSupPid}, {{channel, Channel}, {ch_fr_pid, ChFrPid}}),
             put({ch_fr_pid, ChFrPid}, {channel, Channel}),
+            rabbit_log_connection:info(
+                        "AMQP 1.0 connection ~p: "
+                        "user '~s' authenticated and granted access to vhost '~s'",
+                        [self(), User#user.username, vhost(Hostname)]),
             ok = rabbit_amqp1_0_session:process_frame(ChFrPid, Frame);
         {error, {not_allowed, _}} ->
             rabbit_log:error("AMQP 1.0: user '~s' is not allowed to access virtual host '~s'",

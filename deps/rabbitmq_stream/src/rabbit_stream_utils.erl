@@ -27,11 +27,15 @@
          check_read_permitted/3,
          extract_stream_list/2,
          sort_partitions/1,
-         strip_cr_lf/1]).
+         strip_cr_lf/1,
+         is_sac_ff_enabled/0,
+         consumer_activity_status/2,
+         command_versions/0]).
 
 -define(MAX_PERMISSION_CACHE_SIZE, 12).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
+-include_lib("rabbitmq_stream_common/include/rabbit_stream.hrl").
 
 enforce_correct_name(Name) ->
     % from rabbit_channel
@@ -240,3 +244,36 @@ sort_partitions(Partitions) ->
 
 strip_cr_lf(NameBin) ->
     binary:replace(NameBin, [<<"\n">>, <<"\r">>], <<"">>, [global]).
+
+is_sac_ff_enabled() ->
+    rabbit_feature_flags:is_enabled(stream_single_active_consumer).
+
+consumer_activity_status(Active, Properties) ->
+    case {rabbit_stream_reader:single_active_consumer(Properties), Active}
+    of
+        {false, true} ->
+            up;
+        {true, true} ->
+            single_active;
+        {true, false} ->
+            waiting
+    end.
+
+command_versions() ->
+    [{declare_publisher, ?VERSION_1, ?VERSION_1},
+     {publish, ?VERSION_1, ?VERSION_1},
+     {query_publisher_sequence, ?VERSION_1, ?VERSION_1},
+     {delete_publisher, ?VERSION_1, ?VERSION_1},
+     {subscribe, ?VERSION_1, ?VERSION_1},
+     {credit, ?VERSION_1, ?VERSION_1},
+     {store_offset, ?VERSION_1, ?VERSION_1},
+     {query_offset, ?VERSION_1, ?VERSION_1},
+     {unsubscribe, ?VERSION_1, ?VERSION_1},
+     {create_stream, ?VERSION_1, ?VERSION_1},
+     {delete_stream, ?VERSION_1, ?VERSION_1},
+     {metadata, ?VERSION_1, ?VERSION_1},
+     {close, ?VERSION_1, ?VERSION_1},
+     {heartbeat, ?VERSION_1, ?VERSION_1},
+     {route, ?VERSION_1, ?VERSION_1},
+     {partitions, ?VERSION_1, ?VERSION_1},
+     {stream_stats, ?VERSION_1, ?VERSION_1}].

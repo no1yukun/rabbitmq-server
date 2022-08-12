@@ -26,7 +26,8 @@
          is_supported/1,
          is_enabled/1,
          is_registry_initialized/0,
-         is_registry_written_to_disk/0]).
+         is_registry_written_to_disk/0,
+         inventory/0]).
 
 -ifdef(TEST).
 -on_load(on_load/0).
@@ -44,7 +45,7 @@
 %% @returns the properties of the specified feature flag.
 
 get(FeatureName) ->
-    rabbit_feature_flags:initialize_registry(),
+    rabbit_ff_registry_factory:initialize_registry(),
     %% Initially, is_registry_initialized/0 always returns `false`
     %% and this ?MODULE:get(FeatureName) is always called. The case
     %% statement is here to please Dialyzer.
@@ -65,7 +66,7 @@ get(FeatureName) ->
 %% @returns A map of selected feature flags.
 
 list(Which) ->
-    rabbit_feature_flags:initialize_registry(),
+    rabbit_ff_registry_factory:initialize_registry(),
     %% See get/1 for an explanation of the case statement below.
     case is_registry_initialized() of
         false -> ?MODULE:list(Which);
@@ -82,7 +83,7 @@ list(Which) ->
 %% @returns A map of feature flag states.
 
 states() ->
-    rabbit_feature_flags:initialize_registry(),
+    rabbit_ff_registry_factory:initialize_registry(),
     %% See get/1 for an explanation of the case statement below.
     case is_registry_initialized() of
         false -> ?MODULE:states();
@@ -101,7 +102,7 @@ states() ->
 %%   otherwise.
 
 is_supported(FeatureName) ->
-    rabbit_feature_flags:initialize_registry(),
+    rabbit_ff_registry_factory:initialize_registry(),
     %% See get/1 for an explanation of the case statement below.
     case is_registry_initialized() of
         false -> ?MODULE:is_supported(FeatureName);
@@ -110,17 +111,17 @@ is_supported(FeatureName) ->
 
 -spec is_enabled(rabbit_feature_flags:feature_name()) -> boolean() | state_changing.
 %% @doc
-%% Returns if a feature flag is supported or if its state is changing.
+%% Returns if a feature flag is enabled or if its state is changing.
 %%
 %% Only the informations stored in the local registry is used to answer
 %% this call.
 %%
 %% @param FeatureName The name of the feature flag to be checked.
-%% @returns `true' if the feature flag is supported, `state_changing' if
+%% @returns `true' if the feature flag is enabled, `state_changing' if
 %%   its state is transient, or `false' otherwise.
 
 is_enabled(FeatureName) ->
-    rabbit_feature_flags:initialize_registry(),
+    rabbit_ff_registry_factory:initialize_registry(),
     %% See get/1 for an explanation of the case statement below.
     case is_registry_initialized() of
         false -> ?MODULE:is_enabled(FeatureName);
@@ -157,6 +158,13 @@ is_registry_initialized() ->
 
 is_registry_written_to_disk() ->
     always_return_true().
+
+-spec inventory() -> rabbit_feature_flags:inventory().
+
+inventory() ->
+    #{applications => [],
+      feature_flags => #{},
+      states => #{}}.
 
 always_return_true() ->
     %% This function is here to trick Dialyzer. We want some functions

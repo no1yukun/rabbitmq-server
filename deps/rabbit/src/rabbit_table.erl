@@ -8,21 +8,23 @@
 -module(rabbit_table).
 
 -export([
-    create/0, create/2, ensure_local_copies/1, ensure_table_copy/2,
+    create/0, create/2, ensure_local_copies/1, ensure_table_copy/3,
     wait_for_replicated/1, wait/1, wait/2,
     force_load/0, is_present/0, is_empty/0, needs_default_data/0,
     check_schema_integrity/1, clear_ram_only_tables/0, retry_timeout/0,
     wait_for_replicated/0, exists/1]).
 
+-export([rabbit_index_route_definition/0]).
+
 %% for testing purposes
 -export([definitions/0]).
+
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 
 %%----------------------------------------------------------------------------
 
 -type retry() :: boolean().
--type mnesia_table() :: atom().
 
 %%----------------------------------------------------------------------------
 %% Main interface
@@ -37,7 +39,7 @@ create() ->
     ensure_secondary_indexes(),
     ok.
 
--spec create(mnesia_table(), list()) -> rabbit_types:ok_or_error(any()).
+-spec create(mnesia:table(), list()) -> rabbit_types:ok_or_error(any()).
 
 create(TableName, TableDefinition) ->
     TableDefinition1 = proplists:delete(match, TableDefinition),
@@ -50,8 +52,14 @@ create(TableName, TableDefinition) ->
             throw({error, {table_creation_failed, TableName, TableDefinition1, Reason}})
     end.
 
--spec exists(mnesia_table()) -> boolean().
+-spec exists(mnesia:table()) -> boolean().
 exists(Table) ->
+    case mnesia:is_transaction() of
+        true ->
+            mnesia_schema:get_tid_ts_and_lock(schema, read);
+        false ->
+            ok
+    end,
     lists:member(Table, mnesia:system_info(tables)).
 
 %% Sets up secondary indexes in a blank node database.
@@ -65,10 +73,11 @@ ensure_secondary_index(Table, Field) ->
     {aborted, {already_exists, Table, _}} -> ok
   end.
 
--spec ensure_table_copy(mnesia_table(), node()) -> ok | {error, any()}.
-ensure_table_copy(TableName, Node) ->
+-spec ensure_table_copy(mnesia:table(), node(), ram_copies | disc_copies) ->
+    ok | {error, any()}.
+ensure_table_copy(TableName, Node, StorageType) ->
     rabbit_log:debug("Will add a local schema database copy for table '~s'", [TableName]),
-    case mnesia:add_table_copy(TableName, Node, disc_copies) of
+    case mnesia:add_table_copy(TableName, Node, StorageType) of
         {atomic, ok}                              -> ok;
         {aborted,{already_exists, TableName}}     -> ok;
         {aborted, {already_exists, TableName, _}} -> ok;
@@ -294,6 +303,7 @@ definitions(ram) ->
         {Tab, TabDef} <- definitions()].
 
 definitions() ->
+    Definitions =
     [{rabbit_user,
       [{record_name, internal_user},
        {attributes, internal_user:fields()},
@@ -319,11 +329,6 @@ definitions() ->
        {attributes, vhost:fields()},
        {disc_copies, [node()]},
        {match, vhost:pattern_match_all()}]},
-     {rabbit_listener,
-      [{record_name, listener},
-       {attributes, record_info(fields, listener)},
-       {type, bag},
-       {match, #listener{_='_'}}]},
      {rabbit_durable_route,
       [{record_name, route},
        {attributes, record_info(fields, route)},
@@ -390,7 +395,37 @@ definitions() ->
        {match, amqqueue:pattern_match_on_name(queue_name_match())}]}
     ]
         ++ gm:table_definitions()
-        ++ mirrored_supervisor:table_definitions().
+        ++ mirrored_supervisor:table_definitions(),
+
+    MaybeRouting = case rabbit_feature_flags:is_enabled(direct_exchange_routing_v2) of
+                       true ->
+                           [{rabbit_index_route, rabbit_index_route_definition()}];
+                       false ->
+                           []
+                   end,
+    MaybeListener = case rabbit_feature_flags:is_enabled(listener_records_in_ets) of
+                        false ->
+                            [{rabbit_listener, rabbit_listener_definition()}];
+                        true ->
+                            []
+                    end,
+    Definitions ++ MaybeRouting ++ MaybeListener.
+
+-spec rabbit_index_route_definition() -> list(tuple()).
+rabbit_index_route_definition() ->
+    [{record_name, index_route},
+     {attributes, record_info(fields, index_route)},
+     {type, bag},
+     {storage_properties, [{ets, [{read_concurrency, true}]}]},
+     {match, #index_route{source_key = {exchange_name_match(), '_'},
+                          destination = binding_destination_match(),
+                          _='_'}}].
+
+rabbit_listener_definition() ->
+    [{record_name, listener},
+     {attributes, record_info(fields, listener)},
+     {type, bag},
+     {match, #listener{_='_'}}].
 
 binding_match() ->
     #binding{source = exchange_name_match(),

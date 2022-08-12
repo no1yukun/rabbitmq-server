@@ -3,10 +3,12 @@ on:
   push:
     branches:
       - master
+      - v3.11.x
       - v3.10.x
       - v3.9.x
       - v3.8.x
-      - bump-otp-for-oci
+      - bump-otp-*
+      - bump-elixir-*
       - bump-rbe-*
       - bump-rules_erlang
     paths:
@@ -22,6 +24,9 @@ on:
       - '*.bazel'
       - .github/workflows/test-mixed-versions.yaml
   pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   test-mixed-versions:
     name: Test (Mixed Version Cluster)
@@ -29,15 +34,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        erlang_version:
-        - "23"
+        erlang_major:
         - "24"
+        #! - "25"
     timeout-minutes: 120
     steps:
     - name: CHECKOUT REPOSITORY
       uses: actions/checkout@v3
     - name: MOUNT BAZEL CACHE
-      uses: actions/cache@v3.0.2
+      uses: actions/cache@v3.0.7
       with:
         path: "/home/runner/repo-cache/"
         key: repo-cache
@@ -51,7 +56,6 @@ jobs:
         cat << EOF >> user.bazelrc
           build:buildbuddy --build_metadata=ROLE=CI
           build:buildbuddy --build_metadata=VISIBILITY=PUBLIC
-          build:buildbuddy --remote_instance_name=buildbuddy-io/buildbuddy/ci-${{ matrix.erlang_version }}
           build:buildbuddy --repository_cache=/home/runner/repo-cache/
           build:buildbuddy --color=yes
           build:buildbuddy --disk_cache=
@@ -63,28 +67,31 @@ jobs:
         sudo sysctl -w net.ipv4.tcp_keepalive_time=60
         sudo ethtool -K eth0 tso off gso off gro off tx off rx off lro off
         bazelisk test //... \
-          --config=rbe-${{ matrix.erlang_version }} \
+          --config=rbe-${{ matrix.erlang_major }} \
           --test_tag_filters=mixed-version-cluster,-exclusive,-aws \
+          --build_tests_only \
           --verbose_failures
   test-exclusive-mixed-versions:
     name: Test (Exclusive Tests with Mixed Version Cluster)
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        erlang_version:
-        - "23"
-        - "24"
+        include:
+        - erlang_version: "24"
+          elixir_version: 1.12.3
+        #! - erlang_version: "25"
+        #!   elixir_version: 1.13.4
     timeout-minutes: 60
     steps:
     - name: CHECKOUT REPOSITORY
       uses: actions/checkout@v3
     - name: CONFIGURE OTP & ELIXIR
-      uses: erlef/setup-beam@v1.11
+      uses: erlef/setup-beam@v1.12
       with:
         otp-version: ${{ matrix.erlang_version }}
-        elixir-version: 1.11.4
+        elixir-version: ${{ matrix.elixir_version }}
     - name: MOUNT BAZEL CACHE
-      uses: actions/cache@v3.0.2
+      uses: actions/cache@v3.0.7
       with:
         path: "/home/runner/repo-cache/"
         key: repo-cache
@@ -100,7 +107,6 @@ jobs:
         cat << EOF >> user.bazelrc
           build:buildbuddy --build_metadata=ROLE=CI
           build:buildbuddy --build_metadata=VISIBILITY=PRIVATE
-          build:buildbuddy --remote_instance_name=buildbuddy-io/buildbuddy/ci-exclusive-${{ matrix.erlang_version }}
           build:buildbuddy --repository_cache=/home/runner/repo-cache/
           build:buildbuddy --color=yes
           build:buildbuddy --disk_cache=
@@ -108,6 +114,8 @@ jobs:
           build --@rules_erlang//:erlang_version=${{ matrix.erlang_version }}
           build --@rules_erlang//:erlang_home=${ERLANG_HOME}
           build --//:elixir_home=${ELIXIR_HOME}
+          build --platforms=//bazel/platforms:erlang_external_platform
+          build --extra_execution_platforms=//bazel/platforms:erlang_external_platform
         EOF
     #! - name: Setup tmate session
     #!   uses: mxschmitt/action-tmate@v3

@@ -26,9 +26,9 @@ define HEX_TARBALL_EXTRA_METADATA
 endef
 
 LOCAL_DEPS = compiler crypto public_key sasl ssl syntax_tools tools xmerl
-DEPS = jsx recon credentials_obfuscation
+DEPS = thoas recon credentials_obfuscation
 
-dep_credentials_obfuscation = hex 2.4.0
+dep_credentials_obfuscation = hex 3.1.0
 
 # Variables and recipes in development.*.mk are meant to be used from
 # any Git clone. They are excluded from the files published to Hex.pm.
@@ -46,8 +46,6 @@ DEP_PLUGINS = $(PROJECT)/mk/rabbitmq-build.mk \
 	      $(PROJECT)/mk/rabbitmq-dist.mk \
 	      $(PROJECT)/mk/rabbitmq-test.mk \
 	      $(PROJECT)/mk/rabbitmq-tools.mk
-
-WITHOUT = plugins/proper
 
 PLT_APPS += mnesia crypto ssl
 

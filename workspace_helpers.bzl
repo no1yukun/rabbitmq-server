@@ -3,7 +3,6 @@ load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository", "new_git_r
 load("@rules_erlang//:github.bzl", "github_erlang_app")
 load("@rules_erlang//:hex_archive.bzl", "hex_archive")
 load("@rules_erlang//:hex_pm.bzl", "hex_pm_erlang_app")
-load("//:rabbitmq.bzl", "APP_VERSION")
 
 def rabbitmq_external_deps(rabbitmq_workspace = "@rabbitmq-server"):
     hex_pm_erlang_app(
@@ -49,13 +48,10 @@ def rabbitmq_external_deps(rabbitmq_workspace = "@rabbitmq-server"):
         sha256 = "e4175dc240a70d996156160891e1c62238ede1729e45740bdd38064dad476170",
     )
 
-    github_erlang_app(
-        repo = "credentials-obfuscation",
+    hex_pm_erlang_app(
         name = "credentials_obfuscation",
-        org = "rabbitmq",
-        sha256 = "a5cecd861334a8a5fb8c9b108a74c83ba0041653c53c523bb97f70dbefa30fe3",
-        ref = "v2.4.0",
-        version = "2.4.0",
+        version = "3.1.0",
+        sha256 = "04884e62b1c6cdfba999d4d6b3e99bc0a59d5e439517bc5c01767255afb7b778",
     )
 
     github_erlang_app(
@@ -71,8 +67,8 @@ def rabbitmq_external_deps(rabbitmq_workspace = "@rabbitmq-server"):
 
     hex_pm_erlang_app(
         name = "eetcd",
-        version = "0.3.5",
-        sha256 = "af9d5158ad03a6794d412708d605be5dd1ebd0b8a1271786530d99f165bb0cff",
+        version = "0.3.6",
+        sha256 = "66493bfd6698c1b6baa49679034c3def071ff329961ca1aa7b1dee061c2809af",
         runtime_deps = [
             "@gun//:erlang_app",
         ],
@@ -103,6 +99,7 @@ erlang_app(
     hex_pm_erlang_app(
         name = "gen_batch_server",
         version = "0.8.7",
+        sha256 = "94a49a528486298b009d2a1b452132c0a0d68b3e89d17d3764cb1ec879b7557a",
     )
 
     hex_pm_erlang_app(
@@ -133,16 +130,14 @@ erlang_app(
         org = "potatosalad",
         ref = "2b1d66b5f4fbe33cb198149a8cb23895a2c877ea",
         version = "2b1d66b5f4fbe33cb198149a8cb23895a2c877ea",
-        first_srcs = [
-            "src/jose_block_encryptor.erl",
-        ],
         sha256 = "7816f39d00655f2605cfac180755e97e268dba86c2f71037998ff63792ca727b",
+        build_file = rabbitmq_workspace + "//:BUILD.jose",
     )
 
     hex_pm_erlang_app(
-        name = "jsx",
-        version = "3.1.0",
-        sha256 = "0c5cc8fdc11b53cc25cf65ac6705ad39e54ecc56d1c22e4adb8f5a53fb9427f3",
+        name = "thoas",
+        version = "0.3.0",
+        sha256 = "b8e1f8c8fad317c0b75239a9234cb093de1fb8be7ba3e41433ff80a0b3353973",
     )
 
     github_erlang_app(
@@ -160,6 +155,16 @@ erlang_app(
         name = "osiris",
         branch = "main",
         remote = "https://github.com/rabbitmq/osiris.git",
+        patch_cmds = [
+            """VERSION=$(git rev-parse HEAD)
+echo "Injecting ${VERSION} into Makefile..."
+sed -i"_orig" -E '/PROJECT_VERSION/ s/[0-9]+\\.[0-9]+\\.[0-9]+/'${VERSION}'/' Makefile
+echo "Injecting ${VERSION} into BUILD.bazel..."
+sed -i"_orig" -E '/VERSION/ s/[0-9]+\\.[0-9]+\\.[0-9]+/'${VERSION}'/' BUILD.bazel
+""",
+            """sed -i"_orig2" -E 's/ct_sharded\\.bzl/ct.bzl/' BUILD.bazel
+""",
+        ],
     )
 
     hex_pm_erlang_app(
@@ -211,15 +216,9 @@ erlang_app(
         sha256 = "3624feb7a4b78fd9ae0e66cc3158fe7422770ad6987a1ebf8df4d3303b1c4b0c",
     )
 
-    github_erlang_app(
+    hex_pm_erlang_app(
         name = "seshat",
-        org = "rabbitmq",
-        ref = "main",
-        version = "main",
-        extra_apps = [
-            "sasl",
-            "crypto",
-        ],
+        version = "0.3.2",
     )
 
     hex_pm_erlang_app(
@@ -249,13 +248,6 @@ erlang_app(
         deps = [
             "@enough//:erlang_app",
         ],
-    )
-
-    new_git_repository(
-        name = "trust_store_http",
-        remote = "https://github.com/rabbitmq/trust-store-http.git",
-        branch = "master",
-        build_file = rabbitmq_workspace + "//:BUILD.trust_store_http",
     )
 
 RA_INJECT_GIT_VERSION = """

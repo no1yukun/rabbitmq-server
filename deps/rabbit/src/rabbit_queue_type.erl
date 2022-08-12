@@ -13,8 +13,11 @@
          init/0,
          close/1,
          discover/1,
+         feature_flag_name/1,
          default/0,
+         is_supported/0,
          is_enabled/1,
+         is_compatible/4,
          declare/2,
          delete/4,
          is_recoverable/1,
@@ -124,8 +127,12 @@
               actions/0,
               settle_op/0]).
 
-%% is the queue type feature enabled
 -callback is_enabled() -> boolean().
+
+-callback is_compatible(Durable :: boolean(),
+                        Exclusive :: boolean(),
+                        AutoDelete :: boolean()) ->
+    boolean().
 
 -callback declare(amqqueue:amqqueue(), node()) ->
     {'new' | 'existing' | 'owner_died', amqqueue:amqqueue()} |
@@ -217,7 +224,7 @@
 -callback notify_decorators(amqqueue:amqqueue()) ->
     ok.
 
-%% TODO: this should be controlled by a registry that is populated on boot
+%% TODO: should this use a registry that's populated on boot?
 discover(<<"quorum">>) ->
     rabbit_quorum_queue;
 discover(<<"classic">>) ->
@@ -225,12 +232,33 @@ discover(<<"classic">>) ->
 discover(<<"stream">>) ->
     rabbit_stream_queue.
 
+feature_flag_name(<<"quorum">>) ->
+    quorum_queue;
+feature_flag_name(<<"classic">>) ->
+    undefined;
+feature_flag_name(<<"stream">>) ->
+    stream_queue;
+feature_flag_name(_) ->
+    undefined.
+
 default() ->
     rabbit_classic_queue.
 
+%% is the queue type API supported in the cluster
+is_supported() ->
+    %% the stream_queue feature enables
+    %% the queue_type internal message API
+    rabbit_feature_flags:is_enabled(stream_queue).
+
+%% is a specific queue type implementation enabled
 -spec is_enabled(module()) -> boolean().
 is_enabled(Type) ->
     Type:is_enabled().
+
+-spec is_compatible(module(), boolean(), boolean(), boolean()) ->
+    boolean().
+is_compatible(Type, Durable, Exclusive, AutoDelete) ->
+    Type:is_compatible(Durable, Exclusive, AutoDelete).
 
 -spec declare(amqqueue:amqqueue(), node()) ->
     {'new' | 'existing' | 'owner_died', amqqueue:amqqueue()} |
@@ -548,7 +576,8 @@ credit(Q, CTag, Credit, Drain, Ctxs) ->
 -spec dequeue(amqqueue:amqqueue(), boolean(),
               pid(), rabbit_types:ctag(), state()) ->
     {ok, non_neg_integer(), term(), state()}  |
-    {empty, state()}.
+    {empty, state()} | rabbit_types:error(term()) |
+    {protocol_error, Type :: atom(), Reason :: string(), Args :: term()}.
 dequeue(Q, NoAck, LimiterPid, CTag, Ctxs) ->
     #ctx{state = State0} = Ctx = get_ctx(Q, Ctxs),
     Mod = amqqueue:get_type(Q),
@@ -559,6 +588,8 @@ dequeue(Q, NoAck, LimiterPid, CTag, Ctxs) ->
             {empty, set_ctx(Q, Ctx#ctx{state = State}, Ctxs)};
         {error, _} = Err ->
             Err;
+        {timeout, _} = Err ->
+            {error, Err};
         {protocol_error, _, _, _} = Err ->
             Err
     end.

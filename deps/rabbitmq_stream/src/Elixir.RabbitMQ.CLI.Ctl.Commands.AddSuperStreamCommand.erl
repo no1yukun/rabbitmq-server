@@ -19,10 +19,6 @@
 
 -behaviour('Elixir.RabbitMQ.CLI.CommandBehaviour').
 
--ignore_xref([{'Elixir.RabbitMQ.CLI.DefaultOutput', output, 1},
-              {'Elixir.RabbitMQ.CLI.Core.Helpers', cli_acting_user, 0},
-              {'Elixir.RabbitMQ.CLI.Core.ExitCodes', exit_software, 0}]).
-
 -export([scopes/0,
          usage/0,
          usage_additional/0,
@@ -99,7 +95,8 @@ validate_stream_arguments(#{stream_max_segment_size_bytes := Value} =
 validate_stream_arguments(#{leader_locator := <<"client-local">>} =
                               Opts) ->
     validate_stream_arguments(maps:remove(leader_locator, Opts));
-validate_stream_arguments(#{leader_locator := <<"balanced">>} = Opts) ->
+validate_stream_arguments(#{leader_locator := <<"balanced">>} =
+                              Opts) ->
     validate_stream_arguments(maps:remove(leader_locator, Opts));
 %% 'random' and 'least-leaders' are deprecated and get mapped to 'balanced'
 validate_stream_arguments(#{leader_locator := <<"random">>} = Opts) ->

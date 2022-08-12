@@ -1,4 +1,4 @@
-load("@rules_erlang//:xref.bzl", "xref")
+load("@rules_erlang//:xref2.bzl", "xref")
 load("@rules_erlang//:dialyze.bzl", "dialyze")
 load(
     "//:rabbitmq.bzl",
@@ -17,12 +17,11 @@ rabbitmq_app(
     app_name = APP_NAME,
 )
 
-xref(tags = ["xref"])
+xref()
 
 dialyze(
     dialyzer_opts = RABBITMQ_DIALYZER_OPTS,
     plt = "//:base_plt",
-    tags = ["dialyze"],
 )
 
 suites = [

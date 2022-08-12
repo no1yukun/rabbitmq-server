@@ -93,6 +93,7 @@
 %% mnesia doesn't like unary records, so we add a dummy 'value' field
 -record(route, {binding, value = const}).
 -record(reverse_route, {reverse_binding, value = const}).
+-record(index_route, {source_key, destination, args = []}).
 
 -record(binding, {source, key, destination, args = []}).
 -record(reverse_binding, {destination, key, source, args = []}).
@@ -271,3 +272,7 @@
 
 %% 3.6, 3.7, early 3.8
 -define(LEGACY_INDEX_SEGMENT_ENTRY_COUNT, 16384).
+
+%% Max value for stream max segment size
+-define(MAX_STREAM_MAX_SEGMENT_SIZE, 3_000_000_000).
+

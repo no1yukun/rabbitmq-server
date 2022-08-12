@@ -7,12 +7,9 @@
 
 -module(rabbit).
 
--include_lib("eunit/include/eunit.hrl").
+-include_lib("stdlib/include/assert.hrl").
 -include_lib("kernel/include/logger.hrl").
 -include_lib("rabbit_common/include/logging.hrl").
-
--ignore_xref({rabbit_direct, force_event_refresh, 1}).
--ignore_xref({rabbit_networking, force_connection_event_refresh, 1}).
 
 -behaviour(application).
 
@@ -73,6 +70,18 @@
 -rabbit_boot_step({database_sync,
                    [{description, "database sync"},
                     {mfa,         {rabbit_sup, start_child, [mnesia_sync]}},
+                    {requires,    database},
+                    {enables,     external_infrastructure}]}).
+
+-rabbit_boot_step({networking_metadata_store,
+                   [{description, "networking infrastructure"},
+                    {mfa,         {rabbit_sup, start_child, [rabbit_networking_store]}},
+                    {requires,    database},
+                    {enables,     external_infrastructure}]}).
+
+-rabbit_boot_step({tracking_metadata_store,
+                   [{description, "tracking infrastructure"},
+                    {mfa,         {rabbit_sup, start_child, [rabbit_tracking_store]}},
                     {requires,    database},
                     {enables,     external_infrastructure}]}).
 
@@ -284,8 +293,6 @@
 %% 100 ms
 -define(BOOT_STATUS_CHECK_INTERVAL, 100).
 
--define(COORD_WAL_MAX_SIZE_B, 64_000_000).
-
 %%----------------------------------------------------------------------------
 
 -type restart_type() :: 'permanent' | 'transient' | 'temporary'.
@@ -366,25 +373,10 @@ run_prelaunch_second_phase() ->
     ?LOG_DEBUG("Starting Mnesia"),
     ok = mnesia:start(),
 
+    ok = rabbit_ra_systems:setup(Context),
+
     ?LOG_DEBUG(""),
     ?LOG_DEBUG("== Prelaunch DONE =="),
-
-    ?LOG_DEBUG("Starting Ra Systems"),
-    Default = ra_system:default_config(),
-    Quorum = Default#{name => quorum_queues},
-                      % names => ra_system:derive_names(quorum)},
-    CoordDataDir = filename:join([rabbit_mnesia:dir(), "coordination", node()]),
-    Coord = Default#{name => coordination,
-                     data_dir => CoordDataDir,
-                     wal_data_dir => CoordDataDir,
-                     wal_max_size_bytes => ?COORD_WAL_MAX_SIZE_B,
-                     names => ra_system:derive_names(coordination)},
-
-    {ok, _} = ra_system:start(Quorum),
-    {ok, _} = ra_system:start(Coord),
-
-    ?LOG_DEBUG(""),
-    ?LOG_DEBUG("== Ra System Start done DONE =="),
 
     case IsInitialPass of
         true  -> rabbit_prelaunch:initial_pass_finished();
@@ -407,7 +399,7 @@ start_it(StartType) ->
 
                 T1 = erlang:timestamp(),
                 ?LOG_DEBUG(
-                  "Time to start RabbitMQ: ~p µs",
+                  "Time to start RabbitMQ: ~p us",
                   [timer:now_diff(T1, T0)]),
                 stop_boot_marker(Marker),
                 ok
@@ -695,11 +687,16 @@ maybe_print_boot_progress(true, IterationsLeft) ->
 
 status() ->
     Version = base_product_version(),
+    CryptoLibInfo = case crypto:info_lib() of
+        [Tuple] when is_tuple(Tuple) -> Tuple;
+        Tuple   when is_tuple(Tuple) -> Tuple
+    end,
     S1 = [{pid,                  list_to_integer(os:getpid())},
           %% The timeout value used is twice that of gen_server:call/2.
           {running_applications, rabbit_misc:which_applications()},
           {os,                   os:type()},
           {rabbitmq_version,     Version},
+          {crypto_lib_info,      CryptoLibInfo},
           {erlang_version,       erlang:system_info(system_version)},
           {memory,               rabbit_vm:memory()},
           {alarms,               alarms()},
@@ -865,6 +862,12 @@ start(normal, []) ->
         end,
         log_motd(),
         {ok, SupPid} = rabbit_sup:start_link(),
+
+        %% When we load plugins later in this function, we refresh feature
+        %% flags. If `feature_flags_v2' is enabled, `rabbit_ff_controller'
+        %% will be used. We start it now because we can't wait for boot steps
+        %% to do this (feature flags are refreshed before boot steps run).
+        ok = rabbit_sup:start_child(rabbit_ff_controller),
 
         %% Compatibility with older RabbitMQ versions + required by
         %% rabbit_node_monitor:notify_node_up/0:

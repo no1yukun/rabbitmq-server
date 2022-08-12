@@ -73,7 +73,7 @@ format_level1(Level, #{level_format := lc4}) ->
 format_level1(Level, #{level_format := uc4}) ->
     level_4letter_uc_name(Level);
 format_level1(Level, _) ->
-    level_4letter_lc_name(Level).
+    level_lc_name(Level).
 
 level_lc_name(debug)     -> "debug";
 level_lc_name(info)      -> "info";
@@ -132,8 +132,8 @@ level_4letter_uc_name(emergency) -> "EMGC".
 format_msg(Msg, Meta, #{single_line := true} = Config) ->
       FormattedMsg = format_msg1(Msg, Meta, Config),
       %% The following behavior is the same as the one in the official
-      %% `logger_formatter'; the code is taken from that module (as of
-      %% c5ed910098e9c2787e2c3f9f462c84322064e00d in the master branch).
+      %% `logger_formatter'; the code is taken from:
+      %% https://github.com/erlang/otp/blob/c5ed910098e9c2787e2c3f9f462c84322064e00d/lib/kernel/src/logger_formatter.erl
       FormattedMsg1 = string:strip(FormattedMsg, both),
       re:replace(
         FormattedMsg1,

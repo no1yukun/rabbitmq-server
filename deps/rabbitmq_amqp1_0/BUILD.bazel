@@ -1,4 +1,4 @@
-load("@rules_erlang//:xref.bzl", "xref")
+load("@rules_erlang//:xref2.bzl", "xref")
 load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
 load(
     "//:rabbitmq.bzl",
@@ -46,8 +46,7 @@ rabbitmq_app(
 )
 
 xref(
-    size = "small",
-    tags = ["xref"],
+    additional_libs = BUILD_DEPS,
 )
 
 plt(
@@ -61,7 +60,6 @@ dialyze(
     size = "medium",
     dialyzer_opts = RABBITMQ_DIALYZER_OPTS + ["-Wno_undefined_callbacks"],
     plt = ":base_plt",
-    tags = ["dialyze"],
     warnings_as_errors = False,
 )
 
@@ -97,6 +95,7 @@ suites = [
         flaky = True,
         tags = [
             "dotnet",
+            "exclusive",
         ],
         test_env = {
             "TMPDIR": "$TEST_TMPDIR",

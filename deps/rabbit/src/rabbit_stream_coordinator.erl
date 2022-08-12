@@ -40,6 +40,10 @@
 -export([log_overview/1]).
 -export([replay/1]).
 
+%% for SAC coordinator
+-export([process_command/1,
+         sac_state/1]).
+
 %% for testing and debugging
 -export([eval_listeners/3,
          state/0]).
@@ -88,6 +92,7 @@
                    {member_stopped, stream_id(), args()} |
                    {retention_updated, stream_id(), args()} |
                    {mnesia_updated, stream_id(), args()} |
+                   {sac, rabbit_stream_sac_coordinator:command()} |
                    ra_machine:effect().
 
 -export_type([command/0]).
@@ -170,6 +175,9 @@ delete_replica(StreamId, Node) ->
 policy_changed(Q) when ?is_amqqueue(Q) ->
     StreamId = maps:get(name, amqqueue:get_type_state(Q)),
     process_command({policy_changed, StreamId, #{queue => Q}}).
+
+sac_state(#?MODULE{single_active_consumer = SacState}) ->
+    SacState.
 
 %% for debugging
 state() ->
@@ -338,15 +346,15 @@ all_coord_members() ->
     Nodes = rabbit_mnesia:cluster_nodes(running) -- [node()],
     [{?MODULE, Node} || Node <- [node() | Nodes]].
 
-version() -> 2.
+version() -> 3.
 
 which_module(_) ->
     ?MODULE.
 
 init(_Conf) ->
-    #?MODULE{}.
+    #?MODULE{single_active_consumer = rabbit_stream_sac_coordinator:init_state()}.
 
--spec apply(map(), command(), state()) ->
+-spec apply(ra_machine:command_meta_data(), command(), state()) ->
     {state(), term(), ra_machine:effects()}.
 apply(#{index := _Idx, machine_version := MachineVersion} = Meta0,
       {_CmdTag, StreamId, #{}} = Cmd,
@@ -370,7 +378,7 @@ apply(#{index := _Idx, machine_version := MachineVersion} = Meta0,
                            Reply, inform_listeners_eol(MachineVersion, Stream0));
                 _ ->
                     {Stream2, Effects0} = evaluate_stream(Meta, Stream1, []),
-                    {Stream3, Effects1} = eval_listeners(MachineVersion, Stream2, Effects0),
+                    {Stream3, Effects1} = eval_listeners(MachineVersion, Stream2, Stream0, Effects0),
                     {Stream, Effects2} = eval_retention(Meta, Stream3, Effects1),
                     {Monitors, Effects} = ensure_monitors(Stream, Monitors0, Effects2),
                     return(Meta,
@@ -380,11 +388,18 @@ apply(#{index := _Idx, machine_version := MachineVersion} = Meta0,
         Reply ->
             return(Meta, State0, Reply, [])
     end;
+apply(Meta, {sac, SacCommand}, #?MODULE{single_active_consumer = SacState0,
+                                        monitors = Monitors0} = State0) ->
+    {SacState1, Reply, Effects0} = rabbit_stream_sac_coordinator:apply(SacCommand, SacState0),
+    {SacState2, Monitors1, Effects1} =
+         rabbit_stream_sac_coordinator:ensure_monitors(SacCommand, SacState1, Monitors0, Effects0),
+    return(Meta, State0#?MODULE{single_active_consumer = SacState2,
+                                 monitors = Monitors1}, Reply, Effects1);
 apply(#{machine_version := MachineVersion} = Meta, {down, Pid, Reason} = Cmd,
       #?MODULE{streams = Streams0,
                monitors = Monitors0,
-               listeners = StateListeners0} = State) ->
-
+               listeners = StateListeners0,
+               single_active_consumer = SacState0 } = State) ->
     Effects0 = case Reason of
                    noconnection ->
                        [{monitor, node, node(Pid)}];
@@ -411,11 +426,12 @@ apply(#{machine_version := MachineVersion} = Meta, {down, Pid, Reason} = Cmd,
                 fun(StreamId, _, Acc) ->
                     case Acc of
                         #{StreamId := Stream = #stream{listeners = Listeners0}} ->
-                            Listeners = maps:fold(fun({P, _} = K, _, A) when P == Pid ->
-                                                          maps:remove(K, A);
-                                                     (K, V, A) ->
-                                                          A#{K => V}
-                                                  end, #{}, Listeners0),
+                            %% it will be either a leader or member, not very
+                            %% generic but it is a lot faster than iterating the
+                            %% whole listeners map each time
+                            Listeners = maps:remove({Pid, leader},
+                                                    maps:remove({Pid, member},
+                                                                Listeners0)),
                             Acc#{StreamId => Stream#stream{listeners = Listeners}};
                         _ ->
                             Acc
@@ -438,6 +454,10 @@ apply(#{machine_version := MachineVersion} = Meta, {down, Pid, Reason} = Cmd,
                     return(Meta, State#?MODULE{streams = Streams0,
                                                monitors = Monitors1}, ok, Effects0)
             end;
+        {sac, Monitors1} ->
+            {SacState1, Effects} = rabbit_stream_sac_coordinator:handle_connection_down(Pid, SacState0),
+            return(Meta, State#?MODULE{single_active_consumer = SacState1,
+                                       monitors = Monitors1}, ok, Effects);
         error ->
             return(Meta, State, ok, Effects0)
     end;
@@ -480,8 +500,8 @@ apply(#{machine_version := MachineVersion} = Meta,
                     local_member ->
                         {{Pid, member}, {Node, undefined}}
                 end,
-            Stream1 = Stream0#stream{listeners = maps:put(LKey, LValue, Listeners0)},
-            {Stream, Effects} = eval_listeners(MachineVersion, Stream1, []),
+            {Listeners, Effects} = eval_listener(LKey, LValue, {Listeners0, []}, Stream0),
+            Stream = Stream0#stream{listeners = Listeners},
             {PidStreams, listener} = maps:get(Pid, Monitors0, {#{}, listener}),
             Monitors = maps:put(Pid, {PidStreams#{StreamId => ok}, listener}, Monitors0),
             return(Meta,
@@ -705,9 +725,9 @@ handle_aux(leader, _, {down, Pid, Reason},
     %% An action has failed - report back to the state machine
     case maps:get(Pid, Monitors0, undefined) of
         {StreamId, Action, #{node := Node, epoch := Epoch} = Args} ->
-            rabbit_log:warning("~s: error while executing action for stream queue ~s, "
+            rabbit_log:warning("~s: error while executing action ~w for stream queue ~s, "
                                " node ~s, epoch ~b Err: ~w",
-                               [?MODULE, StreamId, Node, Epoch, Reason]),
+                               [?MODULE, Action, StreamId, Node, Epoch, Reason]),
             Monitors = maps:remove(Pid, Monitors0),
             Cmd = {action_failed, StreamId, Args#{action => Action}},
             send_self_command(Cmd),
@@ -1325,10 +1345,11 @@ update_stream0(#{system_time := _Ts},
 update_stream0(_Meta, _Cmd, undefined) ->
     undefined.
 
-inform_listeners_eol(MachineVersion, #stream{target = deleted,
+inform_listeners_eol(MachineVersion,
+                     #stream{target = deleted,
                              listeners = Listeners,
-                             queue_ref = QRef
-                            }) when MachineVersion =< 1 ->
+                             queue_ref = QRef})
+  when MachineVersion =< 1 ->
     lists:map(fun(Pid) ->
                       {send_msg, Pid,
                        {queue_event, QRef, eol},
@@ -1350,82 +1371,104 @@ inform_listeners_eol(MachineVersion,
 inform_listeners_eol(_, _) ->
     [].
 
+
+eval_listeners(MachineVersion, #stream{} = Stream, Effects) ->
+    eval_listeners(MachineVersion, Stream, undefined, Effects).
+
+eval_listeners(_MachineVersion,
+               #stream{members = Members} = Stream,
+               #stream{members = Members},
+               Effects0) ->
+    %% if the Members have not changed don't evaluate as this is an
+    %% expensive operation when there are many listeners
+    {Stream, Effects0};
 eval_listeners(MachineVersion, #stream{listeners = Listeners0,
                                        queue_ref = QRef,
-                                       members = Members} = Stream, Effects0) 
+                                       members = Members} = Stream,
+               _OldStream, Effects0)
   when MachineVersion =< 1 ->
     case find_leader(Members) of
         {#member{state = {running, _, LeaderPid}}, _} ->
             %% a leader is running, check all listeners to see if any of them
             %% has not been notified of the current leader pid
             {Listeners, Effects} =
-                maps:fold(
-                  fun(_, P, Acc) when P == LeaderPid ->
-                          Acc;
-                     (LPid, _, {L, Acc}) ->
-                          {L#{LPid => LeaderPid},
-                           [{send_msg, LPid,
-                             {queue_event, QRef,
-                              {stream_leader_change, LeaderPid}},
-                             cast} | Acc]}
-                  end, {Listeners0, Effects0}, Listeners0),
+                maps:fold(fun(_, P, Acc) when P == LeaderPid ->
+                                  Acc;
+                             (LPid, _, {L, Acc}) ->
+                                  {L#{LPid => LeaderPid},
+                                   [{send_msg, LPid,
+                                     {queue_event, QRef,
+                                      {stream_leader_change, LeaderPid}},
+                                     cast} | Acc]}
+                          end, {Listeners0, Effects0}, Listeners0),
             {Stream#stream{listeners = Listeners}, Effects};
         _ ->
             {Stream, Effects0}
     end;
-eval_listeners(MachineVersion, #stream{listeners = Listeners0,
-                                       queue_ref = QRef,
-                                       members = Members} = Stream0, Effects0) when MachineVersion >= 2 ->
+eval_listeners(MachineVersion, #stream{listeners = Listeners0} = Stream0,
+               _OldStream, Effects0)
+  when MachineVersion >= 2 ->
     %% Iterating over stream listeners.
     %% Returning the new map of listeners and the effects (notification of changes)
     {Listeners1, Effects1} =
-        maps:fold(fun({P, leader}, ListLPid0, {Lsts0, Effs0}) ->
-                          %% iterating over member to find the leader
-                          {ListLPid1, Effs1} =
-                          maps:fold(fun(_N, #member{state  = {running, _, LeaderPid},
-                                                    role   = {writer, _},
-                                                    target = T}, A)
-                                                    when ListLPid0 == LeaderPid, T /= deleted ->
-                                            %% it's the leader, same PID, nothing to do
-                                            A;
-                                       (_N, #member{state  = {running, _, LeaderPid},
-                                                    role   = {writer, _},
-                                                    target = T}, {_, Efs})
-                                                    when T /= deleted ->
-                                            %% it's the leader, not same PID, assign the new leader, add effect
-                                            {LeaderPid, [{send_msg, P,
-                                                          {queue_event, QRef,
-                                                           {stream_leader_change, LeaderPid}},
-                                                          cast} | Efs]};
-                                       (_N, _M, Acc) ->
-                                            %% it's not the leader, nothing to do
-                                            Acc
-                                    end, {ListLPid0, Effs0}, Members),
-                          {Lsts0#{{P, leader} => ListLPid1}, Effs1};
-                     ({P, member}, {ListNode, ListMPid0}, {Lsts0, Effs0}) ->
-                          %% listening to a member on a given node
-                          %% iterating over the members to find the member on this node
-                          {ListMPid1, Effs1} =
-                          maps:fold(fun(MNode, #member{state = {running, _, MemberPid}, target = T}, Acc)
-                                          when ListMPid0 == MemberPid, ListNode == MNode, T /= deleted ->
-                                            %% it's the local member of this listener
-                                            %% it has not changed, nothing to do
-                                            Acc;
-                                       (MNode, #member{state = {running, _, MemberPid}, target = T}, {_, Efs})
-                                          when ListNode == MNode, T /= deleted ->
-                                            %% it's the local member of this listener
-                                            %% the PID is not the same, updating it in the listener, add effect
-                                            {MemberPid, [{send_msg, P,
-                                                          {queue_event, QRef,
-                                                           {stream_local_member_change, MemberPid}},
-                                                          cast} | Efs]};
-                                       (_N, _M, Acc) ->
-                                            %% not a replica, nothing to do
-                                            Acc
-                                    end, {ListMPid0, Effs0}, Members),
-                          {Lsts0#{{P, member} => {ListNode, ListMPid1}}, Effs1}
-              end, {Listeners0, Effects0}, Listeners0),
+        maps:fold(fun(ListenerSpec, ListLPid0, {Lsts0, Effs0}) ->
+                          eval_listener(ListenerSpec, ListLPid0, {Lsts0, Effs0}, Stream0)
+                  end, {Listeners0, Effects0}, Listeners0),
     {Stream0#stream{listeners = Listeners1}, Effects1}.
+
+eval_listener({P, leader}, ListLPid0, {Lsts0, Effs0},
+              #stream{queue_ref = QRef,
+                      members = Members}) ->
+    %% iterating over member to find the leader
+    {ListLPid1, Effs1} =
+        maps:fold(fun(_N, #member{state  = {running, _, LeaderPid},
+                                  role   = {writer, _},
+                                  target = T}, A)
+                        when ListLPid0 == LeaderPid, T /= deleted ->
+                          %% it's the leader, same PID, nothing to do
+                          A;
+                     (_N, #member{state  = {running, _, LeaderPid},
+                                  role   = {writer, _},
+                                  target = T}, {_, Efs})
+                       when T /= deleted ->
+                          %% it's the leader, not same PID, assign the new leader, add effect
+                          {LeaderPid, [{send_msg, P,
+                                        {queue_event, QRef,
+                                         {stream_leader_change, LeaderPid}},
+                                        cast} | Efs]};
+                     (_N, _M, Acc) ->
+                          %% it's not the leader, nothing to do
+                          Acc
+                  end, {ListLPid0, Effs0}, Members),
+    {Lsts0#{{P, leader} => ListLPid1}, Effs1};
+eval_listener({P, member}, {ListNode, ListMPid0}, {Lsts0, Effs0},
+              #stream{queue_ref = QRef, members = Members}) ->
+    %% listening to a member on a given node
+    %% iterating over the members to find the member on this node
+    {ListMPid1, Effs1} =
+        maps:fold(fun(MNode, #member{state = {running, _, MemberPid},
+                                     target = T}, Acc)
+                        when ListMPid0 == MemberPid,
+                             ListNode == MNode,
+                             T /= deleted ->
+                          %% it's the local member of this listener
+                          %% it has not changed, nothing to do
+                          Acc;
+                     (MNode, #member{state = {running, _, MemberPid},
+                                     target = T}, {_, Efs})
+                       when ListNode == MNode,
+                            T /= deleted ->
+                          %% it's the local member of this listener
+                          %% the PID is not the same, updating it in the listener, add effect
+                          {MemberPid, [{send_msg, P,
+                                        {queue_event, QRef,
+                                         {stream_local_member_change, MemberPid}},
+                                        cast} | Efs]};
+                     (_N, _M, Acc) ->
+                          %% not a replica, nothing to do
+                          Acc
+                  end, {ListMPid0, Effs0}, Members),
+    {Lsts0#{{P, member} => {ListNode, ListMPid1}}, Effs1}.
 
 eval_retention(#{index := Idx} = Meta,
                #stream{conf = #{retention := Ret} = Conf,
@@ -1784,6 +1827,9 @@ machine_version(1, 2, State = #?MODULE{streams = Streams0,
     {State#?MODULE{streams = Streams1,
                    monitors = Monitors2,
                    listeners = undefined}, Effects};
+machine_version(2, 3, State) ->
+    rabbit_log:info("Stream coordinator machine version changes from 2 to 3, updating state."),
+    {State#?MODULE{single_active_consumer = rabbit_stream_sac_coordinator:init_state()}, []};
 machine_version(From, To, State) ->
     rabbit_log:info("Stream coordinator machine version changes from ~p to ~p, no state changes required.",
                     [From, To]),

@@ -17,7 +17,6 @@
 -import(rabbit_mgmt_test_util, [assert_list/2, assert_item/2, test_item/2,
                                 assert_keys/2, assert_no_keys/2,
                                 http_get/2, http_get/3, http_get/5,
-                                http_get_as_proplist/2,
                                 http_put/4, http_put/6,
                                 http_post/4, http_post/6,
                                 http_upload_raw/8,
@@ -59,7 +58,6 @@ all_tests() -> [
     queues_test,
     mirrored_queues_test,
     quorum_queues_test,
-    queues_well_formed_json_test,
     permissions_vhost_test,
     permissions_connection_channel_consumer_test,
     consumers_cq_test,
@@ -124,42 +122,10 @@ init_per_group(all_tests_with_prefix=Group, Config0) ->
     PathConfig = {rabbitmq_management, [{path_prefix, ?PATH_PREFIX}]},
     Config1 = rabbit_ct_helpers:merge_app_env(Config0, PathConfig),
     Config2 = finish_init(Group, Config1),
-    Config3 = start_broker(Config2),
-    Nodes = rabbit_ct_broker_helpers:get_node_configs(
-              Config3, nodename),
-    Ret = rabbit_ct_broker_helpers:rpc(
-            Config3, 0,
-            rabbit_feature_flags,
-            is_supported_remotely,
-            [Nodes, [quorum_queue], 60000]),
-    case Ret of
-        true ->
-            ok = rabbit_ct_broker_helpers:rpc(
-                    Config3, 0, rabbit_feature_flags, enable, [quorum_queue]),
-            Config3;
-        false ->
-            end_per_group(Group, Config3),
-            {skip, "Quorum queues are unsupported"}
-    end;
+    Config3 = start_broker(Config2);
 init_per_group(Group, Config0) ->
     Config1 = finish_init(Group, Config0),
-    Config2 = start_broker(Config1),
-    Nodes = rabbit_ct_broker_helpers:get_node_configs(
-              Config2, nodename),
-    Ret = rabbit_ct_broker_helpers:rpc(
-            Config2, 0,
-            rabbit_feature_flags,
-            is_supported_remotely,
-            [Nodes, [quorum_queue], 60000]),
-    case Ret of
-        true ->
-            ok = rabbit_ct_broker_helpers:rpc(
-                    Config2, 0, rabbit_feature_flags, enable, [quorum_queue]),
-            Config2;
-        false ->
-            end_per_group(Group, Config2),
-            {skip, "Quorum queues are unsupported"}
-    end.
+    Config2 = start_broker(Config1).
 
 end_per_group(_, Config) ->
     inets:stop(),
@@ -632,23 +598,6 @@ quorum_queues_test(Config) ->
 
 get_nodes(Tag, Queue) ->
     lists:sort([binary_to_atom(B, utf8) || B <- maps:get(Tag, Queue)]).
-
-queues_well_formed_json_test(Config) ->
-    %% TODO This test should be extended to the whole API
-    Good = [{durable, true}],
-    http_put(Config, "/queues/%2F/foo", Good, {group, '2xx'}),
-    http_put(Config, "/queues/%2F/baz", Good, {group, '2xx'}),
-
-    Queues = http_get_as_proplist(Config, "/queues/%2F"),
-    %% Ensure keys are unique
-    [begin
-     Sorted = lists:sort(Q),
-     Sorted = lists:usort(Q)
-     end || Q <- Queues],
-
-    http_delete(Config, "/queues/%2F/foo", {group, '2xx'}),
-    http_delete(Config, "/queues/%2F/baz", {group, '2xx'}),
-    passed.
 
 permissions_vhost_test(Config) ->
     QArgs = #{},

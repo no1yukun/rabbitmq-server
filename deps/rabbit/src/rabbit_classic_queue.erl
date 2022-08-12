@@ -7,11 +7,12 @@
 -record(msg_status, {pending :: [pid()],
                      confirmed = [] :: [pid()]}).
 
--record(?MODULE, {pid :: undefined | pid(), %% the current master pid
-                  qref :: term(), %% TODO
-                  unconfirmed = #{} ::
-                  #{non_neg_integer() => #msg_status{}}}).
 -define(STATE, ?MODULE).
+-record(?STATE, {pid :: undefined | pid(), %% the current master pid
+                 qref :: term(), %% TODO
+                 unconfirmed = #{} ::
+                 #{non_neg_integer() => #msg_status{}}}).
+
 
 -opaque state() :: #?STATE{}.
 
@@ -19,6 +20,7 @@
 
 -export([
          is_enabled/0,
+         is_compatible/3,
          declare/2,
          delete/4,
          is_recoverable/1,
@@ -48,9 +50,15 @@
 
 -export([confirm_to_sender/3,
          send_rejection/3,
-         send_queue_event/3]).
+         deliver_to_consumer/5,
+         send_drained/3,
+         send_credit_reply/3]).
 
 is_enabled() -> true.
+
+-spec is_compatible(boolean(), boolean(), boolean()) -> boolean().
+is_compatible(_, _, _) ->
+    true.
 
 declare(Q, Node) when ?amqqueue_is_classic(Q) ->
     QName = amqqueue:get_name(Q),
@@ -237,6 +245,8 @@ handle_event({confirm, MsgSeqNos, Pid}, #?STATE{qref = QRef,
     %% been received (or DOWN has been received).
     %% Hence this part of the confirm logic is queue specific.
     {ok, State#?STATE{unconfirmed = Unconfirmed}, Actions};
+handle_event({deliver, _, _, _} = Delivery, #?STATE{} = State) ->
+    {ok, State, [Delivery]};
 handle_event({reject_publish, SeqNo, _QPid},
               #?STATE{qref = QRef,
                       unconfirmed = U0} = State) ->
@@ -300,9 +310,13 @@ settlement_action(Type, QRef, MsgSeqs, Acc) ->
     {[{amqqueue:amqqueue(), state()}], rabbit_queue_type:actions()}.
 deliver(Qs0, #delivery{flow = Flow,
                        msg_seq_no = MsgNo,
-                       message = #basic_message{exchange_name = _Ex},
-                       confirm = Confirm} = Delivery) ->
-    %% TODO: record master and slaves for confirm processing
+                       message = #basic_message{} = Msg0,
+                       confirm = Confirm} = Delivery0) ->
+    %% add guid to content here instead of in rabbit_basic:message/3,
+    %% as classic queues are the only ones that need it
+    Msg = Msg0#basic_message{id = rabbit_guid:gen()},
+    Delivery = Delivery0#delivery{message = Msg},
+
     {MPids, SPids, Qs, Actions} = qpids(Qs0, Confirm, MsgNo),
     QPids = MPids ++ SPids,
     case Flow of
@@ -509,22 +523,49 @@ update_msg_status(down, Pid, #msg_status{pending = P} = S) ->
 confirm_to_sender(Pid, QName, MsgSeqNos) ->
     %% the stream queue included the queue type refactoring and thus requires
     %% a different message format
-    Evt = case rabbit_ff_registry:is_enabled(stream_queue) of
-              true ->
-                  {queue_event, QName, {confirm, MsgSeqNos, self()}};
-              false ->
-                  {confirm, MsgSeqNos, self()}
-          end,
-    gen_server2:cast(Pid, Evt).
+    case rabbit_queue_type:is_supported() of
+        true ->
+            gen_server:cast(Pid,
+                            {queue_event, QName,
+                             {confirm, MsgSeqNos, self()}});
+        false ->
+            gen_server2:cast(Pid, {confirm, MsgSeqNos, self()})
+    end.
 
 send_rejection(Pid, QName, MsgSeqNo) ->
-    case rabbit_ff_registry:is_enabled(stream_queue) of
+    case rabbit_queue_type:is_supported() of
         true ->
-            gen_server2:cast(Pid, {queue_event, QName,
-                                   {reject_publish, MsgSeqNo, self()}});
+            gen_server:cast(Pid, {queue_event, QName,
+                                  {reject_publish, MsgSeqNo, self()}});
         false ->
             gen_server2:cast(Pid, {reject_publish, MsgSeqNo, self()})
     end.
 
-send_queue_event(Pid, QName, Evt) ->
-    gen_server2:cast(Pid, {queue_event, QName, Evt}).
+deliver_to_consumer(Pid, QName, CTag, AckRequired, Message) ->
+    case rabbit_queue_type:is_supported() of
+        true ->
+            Deliver = {deliver, CTag, AckRequired, [Message]},
+            Evt = {queue_event, QName, Deliver},
+            gen_server:cast(Pid, Evt);
+        false ->
+            Deliver = {deliver, CTag, AckRequired, Message},
+            gen_server2:cast(Pid, Deliver)
+    end.
+
+send_drained(Pid, QName, CTagCredits) ->
+    case rabbit_queue_type:is_supported() of
+        true ->
+            gen_server:cast(Pid, {queue_event, QName,
+                                  {send_drained, CTagCredits}});
+        false ->
+            gen_server2:cast(Pid, {send_drained, CTagCredits})
+    end.
+
+send_credit_reply(Pid, QName, Len) when is_integer(Len) ->
+    case rabbit_queue_type:is_supported() of
+        true ->
+            gen_server:cast(Pid, {queue_event, QName,
+                                  {send_credit_reply, Len}});
+        false ->
+            gen_server2:cast(Pid, {send_credit_reply, Len})
+    end.

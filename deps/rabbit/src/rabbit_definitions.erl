@@ -216,7 +216,9 @@ all_definitions() ->
 
 -spec has_configured_definitions_to_load() -> boolean().
 has_configured_definitions_to_load() ->
-    has_configured_definitions_to_load_via_classic_option() or has_configured_definitions_to_load_via_modern_option().
+    has_configured_definitions_to_load_via_classic_option() or
+        has_configured_definitions_to_load_via_modern_option() or
+        has_configured_definitions_to_load_via_management_option().
 
 %% Retained for backwards compatibility, implicitly assumes the local filesystem source
 maybe_load_definitions(App, Key) ->
@@ -240,6 +242,13 @@ has_configured_definitions_to_load_via_modern_option() ->
 
 has_configured_definitions_to_load_via_classic_option() ->
     case application:get_env(rabbit, load_definitions) of
+        undefined   -> false;
+        {ok, none}  -> false;
+        {ok, _Path} -> true
+    end.
+
+has_configured_definitions_to_load_via_management_option() ->
+    case application:get_env(rabbitmq_management, load_definitions) of
         undefined   -> false;
         {ok, none}  -> false;
         {ok, _Path} -> true
@@ -651,8 +660,9 @@ add_vhost(VHost, ActingUser) ->
     Metadata         = rabbit_data_coercion:atomize_keys(maps:get(metadata, VHost, #{})),
     Description      = maps:get(description, VHost, maps:get(description, Metadata, <<"">>)),
     Tags             = maps:get(tags, VHost, maps:get(tags, Metadata, [])),
+    DefaultQueueType = maps:get(default_queue_type, Metadata, undefined),
 
-    rabbit_vhost:put_vhost(Name, Description, Tags, IsTracingEnabled, ActingUser).
+    rabbit_vhost:put_vhost(Name, Description, Tags, DefaultQueueType, IsTracingEnabled, ActingUser).
 
 add_permission(Permission, ActingUser) ->
     rabbit_auth_backend_internal:set_permissions(maps:get(user,      Permission, undefined),
@@ -683,10 +693,10 @@ add_queue_int(_Queue, R = #resource{kind = queue,
     rabbit_log:warning("Skipping import of a queue whose name begins with 'amq.', "
                        "name: ~s, acting user: ~s", [Name, ActingUser]);
 add_queue_int(Queue, Name, ActingUser) ->
-    case rabbit_amqqueue:lookup(Name) of
-        {ok, _} ->
+    case rabbit_amqqueue:exists(Name) of
+        true ->
             ok;
-        {error, not_found} ->
+        false ->
             rabbit_amqqueue:declare(Name,
                                     maps:get(durable, Queue, undefined),
                                     maps:get(auto_delete, Queue, undefined),
@@ -709,10 +719,10 @@ add_exchange_int(_Exchange, R = #resource{kind = exchange,
     rabbit_log:warning("Skipping import of an exchange whose name begins with 'amq.', "
                        "name: ~s, acting user: ~s", [Name, ActingUser]);
 add_exchange_int(Exchange, Name, ActingUser) ->
-    case rabbit_exchange:lookup(Name) of
-        {ok, _} ->
+    case rabbit_exchange:exists(Name) of
+        true ->
             ok;
-        {error, not_found} ->
+        false ->
             Internal = case maps:get(internal, Exchange, undefined) of
                            undefined -> false; %% =< 2.2.0
                            I         -> I
@@ -782,10 +792,7 @@ filter_out_existing_queues(Queues) ->
 filter_out_existing_queues(VHost, Queues) ->
     Pred = fun(Queue) ->
                Rec = rv(VHost, queue, <<"name">>, Queue),
-               case rabbit_amqqueue:lookup(Rec) of
-                   {ok, _} -> false;
-                   {error, not_found} -> true
-               end
+               not rabbit_amqqueue:exists(Rec)
            end,
     lists:filter(Pred, Queues).
 
@@ -798,11 +805,11 @@ build_filtered_map([], AccMap) ->
     {ok, AccMap};
 build_filtered_map([Queue|Rest], AccMap0) ->
     {Rec, VHost} = build_queue_data(Queue),
-    case rabbit_amqqueue:lookup(Rec) of
-        {error, not_found} ->
+    case rabbit_amqqueue:exists(Rec) of
+        false ->
             AccMap1 = maps:update_with(VHost, fun(V) -> V + 1 end, 1, AccMap0),
             build_filtered_map(Rest, AccMap1);
-        {ok, _} ->
+        true ->
             build_filtered_map(Rest, AccMap0)
     end.
 
@@ -842,7 +849,8 @@ list_exchanges() ->
     %% applications
     [exchange_definition(X) || X <- lists:filter(fun(#exchange{internal = true}) -> false;
                                                     (#exchange{name = #resource{name = <<>>}}) -> false;
-                                                    (X) -> not rabbit_exchange:is_amq_prefixed(X)
+                                                    (#exchange{name = #resource{name = <<"amq.", _Rest/binary>>}}) -> false;
+                                                    (_) -> true
                                                  end,
                                                  rabbit_exchange:list())].
 

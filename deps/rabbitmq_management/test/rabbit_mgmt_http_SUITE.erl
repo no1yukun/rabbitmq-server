@@ -18,7 +18,6 @@
                                 assert_keys/2, assert_no_keys/2,
                                 http_get/2, http_get/3, http_get/5,
                                 http_get_no_auth/3,
-                                http_get_as_proplist/2,
                                 http_put/4, http_put/6,
                                 http_post/4, http_post/6,
                                 http_upload_raw/8,
@@ -39,18 +38,13 @@
 all() ->
     [
      {group, all_tests_with_prefix},
-     {group, all_tests_without_prefix},
-     {group, user_limits_ff}
+     {group, all_tests_without_prefix}
     ].
 
 groups() ->
     [
      {all_tests_with_prefix, [], all_tests()},
-     {all_tests_without_prefix, [], all_tests()},
-     {user_limits_ff, [], [
-        user_limits_list_test,
-        user_limit_set_test
-     ]}
+     {all_tests_without_prefix, [], all_tests()}
     ].
 
 all_tests() -> [
@@ -87,7 +81,7 @@ all_tests() -> [
     exchanges_test,
     queues_test,
     quorum_queues_test,
-    queues_well_formed_json_test,
+    stream_queues_have_consumers_field,
     bindings_test,
     bindings_post_test,
     bindings_null_routing_key_test,
@@ -149,7 +143,9 @@ all_tests() -> [
     disable_basic_auth_test,
     login_test,
     csp_headers_test,
-    auth_attempts_test
+    auth_attempts_test,
+    user_limits_list_test,
+    user_limit_set_test
 ].
 
 %% -------------------------------------------------------------------
@@ -181,51 +177,14 @@ finish_init(Group, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, NodeConf),
     merge_app_env(Config1).
 
-enable_feature_flag_or_skip(FFName, Group, Config0) ->
-    Config1 = finish_init(Group, Config0),
-    Config2 = start_broker(Config1),
-    Nodes = rabbit_ct_broker_helpers:get_node_configs(
-              Config2, nodename),
-    Ret = rabbit_ct_broker_helpers:rpc(
-            Config2, 0,
-            rabbit_feature_flags,
-            is_supported_remotely,
-            [Nodes, [FFName], 60000]),
-    case Ret of
-        true ->
-            ok = rabbit_ct_broker_helpers:rpc(
-                    Config2, 0, rabbit_feature_flags, enable, [FFName]),
-            Config2;
-        false ->
-            end_per_group(Group, Config2),
-            {skip, rabbit_misc:format("Feature flag '~s' is not supported", [FFName])}
-    end.
-
 init_per_group(all_tests_with_prefix=Group, Config0) ->
     PathConfig = {rabbitmq_management, [{path_prefix, ?PATH_PREFIX}]},
     Config1 = rabbit_ct_helpers:merge_app_env(Config0, PathConfig),
     Config2 = finish_init(Group, Config1),
-    Config3 = start_broker(Config2),
-    Nodes = rabbit_ct_broker_helpers:get_node_configs(
-              Config3, nodename),
-    Ret = rabbit_ct_broker_helpers:rpc(
-            Config3, 0,
-            rabbit_feature_flags,
-            is_supported_remotely,
-            [Nodes, [quorum_queue], 60000]),
-    case Ret of
-        true ->
-            ok = rabbit_ct_broker_helpers:rpc(
-                    Config3, 0, rabbit_feature_flags, enable, [quorum_queue]),
-            Config3;
-        false ->
-            end_per_group(Group, Config3),
-            {skip, "Quorum queues are unsupported"}
-    end;
-init_per_group(user_limits_ff = Group, Config0) ->
-    enable_feature_flag_or_skip(user_limits, Group, Config0);
+    start_broker(Config2);
 init_per_group(Group, Config0) ->
-    enable_feature_flag_or_skip(quorum_queue, Group, Config0).
+    Config1 = finish_init(Group, Config0),
+    start_broker(Config1).
 
 end_per_group(_, Config) ->
     inets:stop(),
@@ -239,7 +198,13 @@ init_per_testcase(Testcase = permissions_vhost_test, Config) ->
     rabbit_ct_broker_helpers:delete_vhost(Config, <<"myvhost1">>),
     rabbit_ct_broker_helpers:delete_vhost(Config, <<"myvhost2">>),
     rabbit_ct_helpers:testcase_started(Config, Testcase);
-
+init_per_testcase(Testcase = stream_queues_have_consumers_field, Config) ->
+    case rabbit_ct_helpers:is_mixed_versions() of
+        true ->
+            {skip, "mixed version clusters are not supported"};
+        _ ->
+            rabbit_ct_helpers:testcase_started(Config, Testcase)
+    end;
 init_per_testcase(Testcase, Config) ->
     rabbit_ct_broker_helpers:close_all_connections(Config, 0, <<"rabbit_mgmt_SUITE:init_per_testcase">>),
     rabbit_ct_helpers:testcase_started(Config, Testcase).
@@ -462,21 +427,13 @@ vhosts_test(Config) ->
     passed.
 
 vhosts_description_test(Config) ->
-    Ret = rabbit_ct_broker_helpers:enable_feature_flag(
-            Config, virtual_host_metadata),
-
     http_put(Config, "/vhosts/myvhost", [{description, <<"vhost description">>},
                                          {tags, <<"tag1,tag2">>}], {group, '2xx'}),
-    Expected = case Ret of
-                   {skip, _} ->
-                       #{name => <<"myvhost">>};
-                   _ ->
-                       #{name => <<"myvhost">>,
-                         metadata => #{
-                           description => <<"vhost description">>,
-                           tags => [<<"tag1">>, <<"tag2">>]
-                          }}
-               end,
+    Expected = #{name => <<"myvhost">>,
+                 metadata => #{
+                               description => <<"vhost description">>,
+                               tags => [<<"tag1">>, <<"tag2">>]
+                              }},
     assert_item(Expected, http_get(Config, "/vhosts/myvhost")),
 
     %% Delete it
@@ -1099,22 +1056,25 @@ quorum_queues_test_loop(Config, N) ->
     close_connection(Conn),
     quorum_queues_test_loop(Config, N-1).
 
-queues_well_formed_json_test(Config) ->
-    %% TODO This test should be extended to the whole API
-    Good = [{durable, true}],
-    http_put(Config, "/queues/%2F/foo", Good, {group, '2xx'}),
-    http_put(Config, "/queues/%2F/baz", Good, {group, '2xx'}),
+stream_queues_have_consumers_field(Config) ->
+    Good = [{durable, true}, {arguments, [{'x-queue-type', 'stream'}]}],
+    http_get(Config, "/queues/%2f/sq", ?NOT_FOUND),
+    http_put(Config, "/queues/%2f/sq", Good, {group, '2xx'}),
 
-    Queues = http_get_as_proplist(Config, "/queues/%2F"),
-    %% Ensure keys are unique
-    [begin
-         Q = rabbit_data_coercion:to_proplist(Q0),
-         ?assertEqual(lists:sort(Q), lists:usort(Q))
-     end || Q0 <- Queues],
+    wait_until(fun() ->
+                       Qs = http_get(Config, "/queues/%2F"),
+                       length(Qs) == 1 andalso maps:is_key(consumers, lists:nth(1, Qs))
+               end, 50),
 
-    http_delete(Config, "/queues/%2F/foo", {group, '2xx'}),
-    http_delete(Config, "/queues/%2F/baz", {group, '2xx'}),
-    passed.
+    Queues = http_get(Config, "/queues/%2F"),
+    assert_list([#{name        => <<"sq">>,
+                   arguments => #{'x-queue-type' => <<"stream">>},
+                   consumers   => 0}],
+                Queues),
+
+
+    http_delete(Config, "/queues/%2f/sq", {group, '2xx'}),
+    ok.
 
 bindings_test(Config) ->
     XArgs = [{type, <<"direct">>}],

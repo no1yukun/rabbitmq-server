@@ -7,10 +7,6 @@
 
 -module(rabbit_channel).
 
-%% Transitional step until we can require Erlang/OTP 21 and
-%% use the now recommended try/catch syntax for obtaining the stack trace.
--compile(nowarn_deprecated_function).
-
 %% rabbit_channel processes represent an AMQP 0-9-1 channels.
 %%
 %% Connections parse protocol frames coming from clients and
@@ -1319,7 +1315,7 @@ handle_method(#'basic.publish'{exchange    = ExchangeNameBin,
                      SeqNo = State0#ch.publish_seqno,
                      {SeqNo, State0#ch{publish_seqno = SeqNo + 1}}
         end,
-    case rabbit_basic:message(ExchangeName, RoutingKey, DecodedContent) of
+    case rabbit_basic:message_no_id(ExchangeName, RoutingKey, DecodedContent) of
         {ok, Message} ->
             Delivery = rabbit_basic:delivery(
                          Mandatory, DoConfirm, Message, MsgSeqNo),
@@ -2177,12 +2173,10 @@ deliver_to_queues({Delivery = #delivery{message    = Message = #basic_message{ex
                                         mandatory  = Mandatory,
                                         confirm    = Confirm,
                                         msg_seq_no = MsgSeqNo},
-                   _RoutedToQueueNames = [QName]}, State0 = #ch{queue_states = QueueStates0}) -> %% optimisation when there is one queue
-    {QueueNames, Qs} = case rabbit_amqqueue:lookup(QName) of
-                           {ok, Q} ->
-                               {[QName], [Q]};
-                           _ -> {[], []}
-                       end,
+                   RoutedToQueueNames = [QName]}, State0 = #ch{queue_states = QueueStates0}) -> %% optimisation when there is one queue
+    Qs0 = rabbit_amqqueue:lookup(RoutedToQueueNames),
+    Qs = rabbit_amqqueue:prepend_extra_bcc(Qs0),
+    QueueNames = lists:map(fun amqqueue:get_name/1, Qs),
     case rabbit_queue_type:deliver(Qs, Delivery, QueueStates0) of
         {ok, QueueStates, Actions}  ->
             rabbit_global_counters:messages_routed(amqp091, erlang:min(1, length(Qs))),
@@ -2217,7 +2211,8 @@ deliver_to_queues({Delivery = #delivery{message    = Message = #basic_message{ex
                                         confirm    = Confirm,
                                         msg_seq_no = MsgSeqNo},
                    RoutedToQueueNames}, State0 = #ch{queue_states = QueueStates0}) ->
-    Qs = rabbit_amqqueue:lookup(RoutedToQueueNames),
+    Qs0 = rabbit_amqqueue:lookup(RoutedToQueueNames),
+    Qs = rabbit_amqqueue:prepend_extra_bcc(Qs0),
     QueueNames = lists:map(fun amqqueue:get_name/1, Qs),
     case rabbit_queue_type:deliver(Qs, Delivery, QueueStates0) of
         {ok, QueueStates, Actions}  ->
@@ -2524,13 +2519,18 @@ handle_method(#'queue.declare'{queue       = QueueNameBin,
                                exclusive   = ExclusiveDeclare,
                                auto_delete = AutoDelete,
                                nowait      = NoWait,
-                               arguments   = Args} = Declare,
+                               arguments   = Args0} = Declare,
               ConnPid, AuthzContext, CollectorPid, VHostPath,
               #user{username = Username} = User) ->
     Owner = case ExclusiveDeclare of
                 true  -> ConnPid;
                 false -> none
             end,
+    Args = rabbit_amqqueue:augment_declare_args(VHostPath,
+                                                DurableDeclare,
+                                                ExclusiveDeclare,
+                                                AutoDelete,
+                                                Args0),
     StrippedQueueNameBin = strip_cr_lf(QueueNameBin),
     Durable = DurableDeclare andalso not ExclusiveDeclare,
     ActualNameBin = case StrippedQueueNameBin of
@@ -2891,7 +2891,9 @@ find_queue_name_from_quorum_name(Name, QStates) ->
                           amqqueue:get_name(Q);
                       _ ->
                           undefined
-                  end
+                  end;
+             (_, _, Acc) ->
+                  Acc
           end,
     rabbit_queue_type:fold_state(Fun, undefined, QStates).
 

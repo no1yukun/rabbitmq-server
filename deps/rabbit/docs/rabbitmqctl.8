@@ -864,6 +864,14 @@ can take any value from the list that follows:
 The name of the virtual host with non-ASCII characters escaped as in C.
 .It Cm tracing
 Whether tracing is enabled for this virtual host.
+.It Cm default_queue_type
+Default queue type for this vhost.
+.It Cm description
+Virtual host description.
+.It Cm tags
+Virtual host tags.
+.It Cm cluster_state
+Virtual host state: nodedown, running, stopped.
 .El
 .Pp
 If no
@@ -1560,13 +1568,13 @@ but the key-value pair isn't tied to a virtual host.
 .It Ar name
 The name of the global runtime parameter being set.
 .It Ar value
-The value for the global runtime parameter, as a JSON term.
+The value for the global runtime parameter, as a JSON document.
 In most shells you are very likely to need to quote this.
 .El
 .Pp
 For example, this command sets the global runtime parameter
 .Qq mqtt_default_vhosts
-to the JSON term {"O=client,CN=guest":"/"}:
+to the JSON document {"O=client,CN=guest":"/"}:
 .sp
 .Dl rabbitmqctl set_global_parameter mqtt_default_vhosts '{"O=client,CN=guest":"/"}'
 .\" ------------------------------------------------------------------
@@ -1579,7 +1587,7 @@ The name of the component for which the parameter is being set.
 .It Ar name
 The name of the parameter being set.
 .It Ar value
-The value for the parameter, as a JSON term.
+The value for the parameter, as a JSON document.
 In most shells you are very likely to need to quote this.
 .El
 .Pp
@@ -1630,7 +1638,7 @@ The name of the policy.
 The regular expression, which when matches on a given resources causes
 the policy to apply.
 .It Ar definition
-The definition of the policy, as a JSON term.
+The definition of the policy, as a JSON document.
 In most shells you are very likely to need to quote this.
 .It Ar priority
 The priority of the policy as an integer.
@@ -1695,19 +1703,25 @@ not be visible to
 .Nm .
 .Bl -tag -width Ds
 .\" ------------------------------------------------------------------
-.It Cm add_vhost Ar vhost
+.It Cm add_vhost Ar vhost Op Fl -description Ar desc Fl -tags Ar tags Fl -default-queue-type Ar default-q-type
 .Bl -tag -width Ds
 .It Ar vhost
 The name of the virtual host entry to create.
+.It Ar desc
+Arbitrary virtual host description, e.g. its purpose, for operator's convenience.
+.It Ar tags
+A comma-separated list of virtual host tags for operator's convenient
+.It Ar default-q-type
+If clients do not specify queue type explicitly, this type will be used. One of: quorum, stream.
 .El
 .Pp
 Creates a virtual host.
 .Pp
 For example, this command instructs the RabbitMQ broker to create a new
 virtual host called
-.Qq test :
+.Qq project9_dev_18 :
 .Pp
-.Dl rabbitmqctl add_vhost test
+.Dl rabbitmqctl add_vhost project9_dev_18 --description 'Dev environment no. 18' --tags "dev,project9"
 .\" ------------------------------------------------------------------
 .It Cm clear_vhost_limits Op Fl p Ar vhost
 .Pp
@@ -1765,7 +1779,7 @@ virtual host called
 Sets virtual host limits.
 .Bl -tag -width Ds
 .It Ar definition
-The definition of the limits, as a JSON term.
+The definition of the limits, as a JSON document.
 In most shells you are very likely to need to quote this.
 .Pp
 Recognised limits are:
@@ -1801,6 +1815,79 @@ This command disables client connections in vhost
 .Qq qa_env :
 .sp
 .Dl rabbitmqctl set_vhost_limits -p qa_env '{"max-connections": 0}'
+.\" ------------------------------------------------------------------
+.It Cm set_user_limits Oc Ar username Oc Ar definition
+.Pp
+Sets user limits.
+.Bl -tag -width Ds
+.It Ar username
+The name of the user to apply limits to
+.It Ar definition
+The definition of the limits, as a JSON document.
+In most shells you are very likely to need to quote this.
+.Pp
+Recognised limits are:
+.Bl -bullet -compact
+.It
+max-connections
+.It
+max-channels
+.El
+.Pp
+Use a negative value to specify "no limit".
+.El
+.Pp
+For example, this command limits the max number of concurrent
+connections a user is allowed to open
+.Qq limited_user
+to 64:
+.sp
+.Dl rabbitmqctl set_user_limits limited_user '{"max-connections": 64}'
+.Pp
+This command limits the max number of channels a user is allowed to open
+on a connection
+.Qq limited_user
+to 16:
+.sp
+.Dl rabbitmqctl set_user_limits limited_user '{"max-channels": 16}'
+.Pp
+This command clears the max number of connections limit for user
+.Qq limited_user :
+.sp
+.Dl rabbitmqctl clear_user_limits limited_user 'max-connections'
+.Pp
+This command disables client connections for user
+.Qq limited_user :
+.sp
+.Dl rabbitmqctl set_user_limits limited_user '{"max-connections": 0}'
+.\" ------------------------------------------------------------------
+.It Cm clear_user_limits Oc Ar username Oc Ar limit
+.Pp
+Clears user limits.
+.Bl -tag -width Ds
+.It Ar username
+The name of the user to clear limits of
+.It Ar limit
+The name of the limit or "all" to clear all limits at once.
+.El
+.Pp
+Recognised limits are:
+.Bl -bullet -compact
+.It
+max-connections
+.It
+max-channels
+.El
+.Pp
+For example, this command clears max connection limits of user
+.Qq limited_user :
+.sp
+.Dl rabbitmqctl clear_user_limits limited_user 'max-connections'
+.Pp
+This command clears all limits of user
+.Qq limited_user :
+.sp
+.Dl rabbitmqctl clear_user_limits limited_user all
 .\" ------------------------------------------------------------------
 .It Cm trace_off Op Fl p Ar vhost
 .Bl -tag -width Ds
@@ -1895,7 +1982,7 @@ Values lower than 1.0 can be dangerous and should be used carefully.
 Sets log level in the running node
 .Pp
 Supported
-.Ar type
+.Ar log_level
 values are:
 .Bl -bullet -compact
 .It
@@ -1906,6 +1993,8 @@ info
 warning
 .It
 error
+.It
+critical
 .It
 none
 .El
@@ -1956,7 +2045,7 @@ Enables a feature flag on the target node.
 .Pp
 Example:
 .Sp
-.Dl rabbitmqctl enable_feature_flag quorum_queue
+.Dl rabbitmqctl enable_feature_flag stream_queue
 .Pp
 You can also enable all feature flags by specifying "all":
 .Sp

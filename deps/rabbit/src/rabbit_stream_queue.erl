@@ -10,6 +10,7 @@
 -behaviour(rabbit_queue_type).
 
 -export([is_enabled/0,
+         is_compatible/3,
          declare/2,
          delete/4,
          purge/1,
@@ -42,14 +43,18 @@
 -export([parse_offset_arg/1]).
 
 -export([status/2,
-         tracking_status/2]).
+         tracking_status/2,
+         get_overview/1]).
+
+-export([check_max_segment_size_bytes/1]).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include("amqqueue.hrl").
 
 -define(INFO_KEYS, [name, durable, auto_delete, arguments, leader, members, online, state,
                     messages, messages_ready, messages_unacknowledged, committed_offset,
-                    policy, operator_policy, effective_policy_definition, type, memory]).
+                    policy, operator_policy, effective_policy_definition, type, memory,
+                    consumers]).
 
 -type appender_seq() :: non_neg_integer().
 
@@ -83,6 +88,15 @@
 is_enabled() ->
     rabbit_feature_flags:is_enabled(stream_queue).
 
+-spec is_compatible(boolean(), boolean(), boolean()) -> boolean().
+is_compatible(_Durable = true,
+              _Exclusive = false,
+              _AutoDelete = false) ->
+    true;
+is_compatible(_, _, _) ->
+    false.
+
+
 -spec declare(amqqueue:amqqueue(), node()) ->
     {'new' | 'existing', amqqueue:amqqueue()} |
     {protocol_error, Type :: atom(), Reason :: string(), Args :: term()}.
@@ -90,12 +104,25 @@ declare(Q0, _Node) when ?amqqueue_is_stream(Q0) ->
     case rabbit_queue_type_util:run_checks(
            [fun rabbit_queue_type_util:check_auto_delete/1,
             fun rabbit_queue_type_util:check_exclusive/1,
-            fun rabbit_queue_type_util:check_non_durable/1],
+            fun rabbit_queue_type_util:check_non_durable/1,
+            fun rabbit_stream_queue:check_max_segment_size_bytes/1],
            Q0) of
         ok ->
             create_stream(Q0);
         Err ->
             Err
+    end.
+
+check_max_segment_size_bytes(Q) ->
+    Args = amqqueue:get_arguments(Q),
+    case rabbit_misc:table_lookup(Args, <<"x-stream-max-segment-size-bytes">>) of
+        undefined ->
+            ok;
+        {_Type, Val} when Val > ?MAX_STREAM_MAX_SEGMENT_SIZE ->
+            {protocol_error, precondition_failed, "Exceeded max value for x-stream-max-segment-size-bytes",
+             []};
+        _ ->
+            ok
     end.
 
 create_stream(Q0) ->
@@ -295,14 +322,20 @@ begin_stream(#stream_client{name = QName, readers = Readers0} = State0,
 
 cancel(_Q, ConsumerTag, OkMsg, ActingUser, #stream_client{readers = Readers0,
                                                           name = QName} = State) ->
-    Readers = maps:remove(ConsumerTag, Readers0),
-    rabbit_core_metrics:consumer_deleted(self(), ConsumerTag, QName),
-    rabbit_event:notify(consumer_deleted, [{consumer_tag, ConsumerTag},
-                                           {channel, self()},
-                                           {queue, QName},
-                                           {user_who_performed_action, ActingUser}]),
-    maybe_send_reply(self(), OkMsg),
-    {ok, State#stream_client{readers = Readers}}.
+    case maps:take(ConsumerTag, Readers0) of
+        {#stream{log = Log}, Readers} ->
+            ok = close_log(Log),
+            rabbit_core_metrics:consumer_deleted(self(), ConsumerTag, QName),
+            rabbit_event:notify(consumer_deleted,
+                                [{consumer_tag, ConsumerTag},
+                                 {channel, self()},
+                                 {queue, QName},
+                                 {user_who_performed_action, ActingUser}]),
+            maybe_send_reply(self(), OkMsg),
+            {ok, State#stream_client{readers = Readers}};
+        error ->
+            {ok, State}
+    end.
 
 credit(CTag, Credit, Drain, #stream_client{readers = Readers0,
                                            name = Name,
@@ -466,7 +499,7 @@ settle(_, _, _, #stream_client{name = Name}) ->
      "basic.nack and basic.reject not supported by stream queues ~s",
      [rabbit_misc:rs(Name)]}.
 
-info(Q, all_items) ->
+info(Q, all_keys) ->
     info(Q, ?INFO_KEYS);
 info(Q, Items) ->
     lists:foldr(fun(Item, Acc) ->
@@ -486,6 +519,22 @@ i(leader, Q) when ?is_amqqueue(Q) ->
 i(members, Q) when ?is_amqqueue(Q) ->
     #{nodes := Nodes} = amqqueue:get_type_state(Q),
     Nodes;
+i(consumers, Q) when ?is_amqqueue(Q) ->
+    QName = amqqueue:get_name(Q),
+    #{nodes := Nodes} = amqqueue:get_type_state(Q),
+    Spec = [{{{'$1', '_', '_'}, '_', '_', '_', '_', '_', '_'}, [{'==', {QName}, '$1'}], [true]}],
+    lists:foldl(fun(N, Acc) ->
+                        case rabbit_misc:rpc_call(N,
+                                                  ets,
+                                                  select_count,
+                                                  [consumer_created, Spec],
+                                                  10000) of
+                            Count when is_integer(Count) ->
+                                Acc + Count;
+                            _ ->
+                                Acc
+                        end
+                end, 0, Nodes);
 i(memory, Q) when ?is_amqqueue(Q) ->
     %% Return writer memory. It's not the full memory usage (we also have replica readers on
     %% the writer node), but might be good enough
@@ -544,9 +593,13 @@ i(committed_offset, Q) ->
     %% TODO should it be on a metrics table?
     %% The queue could be removed between the list() and this call
     %% to retrieve the overview. Let's default to '' if it's gone.
-    Data = osiris_counters:overview(),
-    maps:get(committed_offset,
-             maps:get({osiris_writer, amqqueue:get_name(Q)}, Data, #{}), '');
+    Key = {osiris_writer, amqqueue:get_name(Q)},
+    case osiris_counters:overview(Key) of
+        undefined ->
+            '';
+        Data ->
+            maps:get(committed_offset, Data, '')
+    end;
 i(policy, Q) ->
     case rabbit_policy:name(Q) of
         none   -> '';
@@ -585,7 +638,6 @@ status(Vhost, QueueName) ->
             {error, quorum_queue_not_supported};
         {ok, Q} when ?amqqueue_is_stream(Q) ->
             _Pid = amqqueue:get_pid(Q),
-            % Max = maps:get(max_segment_size_bytes, Conf, osiris_log:get_default_max_segment_size_bytes()),
             [begin
                  [{role, Role},
                   get_key(node, C),
@@ -607,32 +659,30 @@ get_counters(Q) ->
     {ok, Members} = rabbit_stream_coordinator:members(StreamId),
     QName = amqqueue:get_name(Q),
     Counters = [begin
-                    Data = safe_get_overview(Node),
-                    get_counter(QName, Data, #{node => Node})
+                    safe_get_overview(Node, QName)
                 end || Node <- maps:keys(Members)],
     lists:filter(fun (X) -> X =/= undefined end, Counters).
 
-safe_get_overview(Node) ->
-    case rpc:call(Node, osiris_counters, overview, []) of
+safe_get_overview(Node, QName) ->
+    case rpc:call(Node, ?MODULE, get_overview, [QName]) of
         {badrpc, _} ->
             #{node => Node};
-        Data ->
-            Data
+        Result ->
+            Result
     end.
 
-get_counter(QName, Data, Add) ->
-    case maps:get({osiris_writer, QName}, Data, undefined) of
+get_overview(QName) ->
+    case osiris_counters:overview({osiris_writer, QName}) of
         undefined ->
-            case maps:get({osiris_replica, QName}, Data, undefined) of
+            case osiris_counters:overview({osiris_replica, QName}) of
                 undefined ->
-                    {undefined, Add};
+                    undefined;
                 M ->
-                    {replica, maps:merge(Add, M)}
+                    {replica, M#{node => node()}}
             end;
         M ->
-            {writer, maps:merge(Add, M)}
+            {writer, M#{node => node()}}
     end.
-
 
 -spec tracking_status(rabbit_types:vhost(), Name :: rabbit_misc:resource_name()) ->
     [[{atom(), term()}]] | {error, term()}.
@@ -662,13 +712,8 @@ tracking_status(Vhost, QueueName) ->
 
 readers(QName) ->
     try
-        Data = osiris_counters:overview(),
-        Readers = case maps:get({osiris_writer, QName}, Data, not_found) of
-                      not_found ->
-                          maps:get(readers, maps:get({osiris_replica, QName}, Data, #{}), 0);
-                      Map ->
-                          maps:get(readers, Map, 0)
-                  end,
+        {_Role, Counters} = get_overview(QName),
+        Readers = maps:get(readers, Counters, 0),
         {node(), Readers}
     catch
         _:_ ->
@@ -990,3 +1035,7 @@ set_leader_pid(Pid, QName) ->
         _ ->
             ok
     end.
+
+close_log(undefined) -> ok;
+close_log(Log) ->
+    osiris_log:close(Log).

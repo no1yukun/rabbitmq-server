@@ -1,4 +1,4 @@
-load("@rules_erlang//:xref.bzl", "xref")
+load("@rules_erlang//:xref2.bzl", "xref")
 load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
 load("//:rabbitmq.bzl", "APP_VERSION", "rabbitmq_app", "rabbitmq_suite")
 
@@ -10,7 +10,7 @@ APP_MODULE = "rabbit_prelaunch_app"
 
 RUNTIME_DEPS = [
     "@cuttlefish//:erlang_app",
-    "@jsx//:erlang_app",
+    "@thoas//:erlang_app",
 ]
 
 DEPS = [
@@ -28,11 +28,9 @@ rabbitmq_app(
 
 xref(
     additional_libs = [
-        "@ranch//:erlang_app",
         "@systemd//:erlang_app",
         "@osiris//:erlang_app",
     ],
-    tags = ["xref"],
 )
 
 plt(
@@ -42,10 +40,15 @@ plt(
 
 dialyze(
     plt = ":base_plt",
-    tags = ["dialyze"],
     warnings_as_errors = False,
 )
 
-rabbitmq_suite(
-    name = "rabbit_logger_std_h_SUITE",
-)
+suites = [
+    rabbitmq_suite(
+        name = "rabbit_logger_std_h_SUITE",
+    ),
+    rabbitmq_suite(
+        name = "rabbit_prelaunch_file_SUITE",
+        size = "small",
+    ),
+]

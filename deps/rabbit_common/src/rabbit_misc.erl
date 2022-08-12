@@ -52,6 +52,7 @@
 -export([dict_cons/3, orddict_cons/3, maps_cons/3, gb_trees_cons/3]).
 -export([gb_trees_fold/3, gb_trees_foreach/2]).
 -export([all_module_attributes/1,
+         rabbitmq_related_apps/0,
          rabbitmq_related_module_attributes/1,
          module_attributes_from_apps/2,
          build_acyclic_graph/3]).
@@ -1179,7 +1180,7 @@ is_os_process_alive(Pid) ->
                                  false ->
                                      Cmd =
                                      format(
-                                       "PowerShell -Command "
+                                       "powershell.exe -NoLogo -NoProfile -NonInteractive -Command "
                                        "\"(Get-Process -Id ~s).ProcessName\"",
                                        [PidS]),
                                      Res =
@@ -1265,8 +1266,14 @@ sequence_error([T])                      -> T;
 sequence_error([{error, _} = Error | _]) -> Error;
 sequence_error([_ | Rest])               -> sequence_error(Rest).
 
-check_expiry(N) when N < 0                 -> {error, {value_negative, N}};
-check_expiry(_N)                           -> ok.
+check_expiry(N)
+  when N < 0 ->
+    {error, {value_negative, N}};
+check_expiry(N)
+  when N > 315_360_000_000 -> %% 10 years in milliseconds
+    {error, {value_too_large, N}};
+check_expiry(_N) ->
+    ok.
 
 base64url(In) ->
     lists:reverse(lists:foldl(fun ($\+, Acc) -> [$\- | Acc];

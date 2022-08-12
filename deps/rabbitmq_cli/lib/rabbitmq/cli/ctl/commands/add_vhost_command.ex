@@ -5,12 +5,13 @@
 ## Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.AddVhostCommand do
-  alias RabbitMQ.CLI.Core.{DocGuide, Helpers}
+  alias RabbitMQ.CLI.Core.{DocGuide, ExitCodes, FeatureFlags, Helpers}
 
   @behaviour RabbitMQ.CLI.CommandBehaviour
 
   def switches(), do: [description: :string,
-                       tags: :string]
+                       tags: :string,
+                       default_queue_type: :string]
   def aliases(), do: [d: :description]
 
   def merge_defaults(args, opts) do
@@ -19,25 +20,43 @@ defmodule RabbitMQ.CLI.Ctl.Commands.AddVhostCommand do
   use RabbitMQ.CLI.Core.AcceptsOnePositionalArgument
   use RabbitMQ.CLI.Core.RequiresRabbitAppRunning
 
-  def run([vhost], %{node: node_name, description: desc, tags: tags}) do
-    :rabbit_misc.rpc_call(node_name, :rabbit_vhost, :add, [vhost, desc, parse_tags(tags), Helpers.cli_acting_user()])
+  def run([vhost], %{node: node_name, description: desc, tags: tags, default_queue_type: default_qt}) do
+    meta = %{description: desc,
+             tags: parse_tags(tags),
+             default_queue_type: default_qt}
+    # check if the respective feature flag is enabled
+    case default_qt do
+      "quorum" ->
+        FeatureFlags.assert_feature_flag_enabled(node_name, :quorum_queue, fn () ->
+          :rabbit_misc.rpc_call(node_name, :rabbit_vhost, :add, [vhost, meta, Helpers.cli_acting_user()])
+        end)
+      "stream" ->
+        FeatureFlags.assert_feature_flag_enabled(node_name, :stream_queue, fn () ->
+          :rabbit_misc.rpc_call(node_name, :rabbit_vhost, :add, [vhost, meta, Helpers.cli_acting_user()])
+        end)
+      _ ->
+        :rabbit_misc.rpc_call(node_name, :rabbit_vhost, :add, [vhost, meta, Helpers.cli_acting_user()])
+    end
   end
-  def run([vhost], %{node: node_name, tags: tags}) do
-    :rabbit_misc.rpc_call(node_name, :rabbit_vhost, :add, [vhost, "", parse_tags(tags), Helpers.cli_acting_user()])
+  def run([vhost], %{node: node_name, description: desc, tags: tags}) do
+    :rabbit_misc.rpc_call(node_name, :rabbit_vhost, :add, [vhost, description, tags, Helpers.cli_acting_user()])
   end
   def run([vhost], %{node: node_name}) do
     :rabbit_misc.rpc_call(node_name, :rabbit_vhost, :add, [vhost, Helpers.cli_acting_user()])
   end
-
+  def output({:error, :invalid_queue_type}, _opts) do
+    {:error, ExitCodes.exit_usage, "Unsupported default queue type"}
+  end
   use RabbitMQ.CLI.DefaultOutput
 
-  def usage, do: "add_vhost <vhost> [--description <description> --tags \"<tag1>,<tag2>,<...>\"]"
+  def usage, do: "add_vhost <vhost> [--description <description> --tags \"<tag1>,<tag2>,<...>\" --default-queue-type <quorum|classic|stream>]"
 
   def usage_additional() do
     [
       ["<vhost>", "Virtual host name"],
       ["--description <description>", "Virtual host description"],
-      ["--tags <tags>", "Command separated list of tags"]
+      ["--tags <tags>", "Command separated list of tags"],
+      ["--default-queue-type <quorum|classic|stream>", "Queue type to use if no type is explicitly provided by the client"]
     ]
   end
 

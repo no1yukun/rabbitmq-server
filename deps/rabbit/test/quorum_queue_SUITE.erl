@@ -54,6 +54,7 @@ groups() ->
                                             cleanup_data_dir]
                        ++ memory_tests()},
                       {cluster_size_3, [], [
+                                            channel_handles_ra_event,
                                             declare_during_node_down,
                                             simple_confirm_availability_on_leader_change,
                                             publishing_to_unavailable_queue,
@@ -124,6 +125,7 @@ all_tests() ->
      cancel_sync_queue,
      idempotent_recover,
      vhost_with_quorum_queue_is_deleted,
+     vhost_with_default_queue_type_declares_quorum_queue,
      delete_immediately_by_resource,
      consume_redelivery_count,
      subscribe_redelivery_count,
@@ -144,6 +146,7 @@ all_tests() ->
      message_ttl,
      per_message_ttl,
      per_message_ttl_mixed_expiry,
+     per_message_ttl_expiration_too_high,
      consumer_priorities,
      cancel_consumer_gh_3729
     ].
@@ -208,24 +211,14 @@ init_per_group(Group, Config) ->
                 {skip, _} ->
                     Ret;
                 Config2 ->
-                    EnableFF = rabbit_ct_broker_helpers:enable_feature_flag(
-                                 Config2, quorum_queue),
-                    case EnableFF of
-                        ok ->
-                            ok = rabbit_ct_broker_helpers:rpc(
-                                   Config2, 0, application, set_env,
-                                   [rabbit, channel_tick_interval, 100]),
-                            %% HACK: the larger cluster sizes benefit for a bit
-                            %% more time after clustering before running the
-                            %% tests.
-                            timer:sleep(ClusterSize * 1000),
-                            ok = rabbit_ct_broker_helpers:enable_feature_flag(
-                                   Config2, maintenance_mode_status),
-                            Config2;
-                        Skip ->
-                            end_per_group(Group, Config2),
-                            Skip
-                    end
+                    ok = rabbit_ct_broker_helpers:rpc(
+                           Config2, 0, application, set_env,
+                           [rabbit, channel_tick_interval, 100]),
+                    %% HACK: the larger cluster sizes benefit for a bit
+                    %% more time after clustering before running the
+                    %% tests.
+                    timer:sleep(ClusterSize * 1000),
+                    Config2
             end
     end.
 
@@ -251,24 +244,10 @@ init_per_testcase(Testcase, Config) when Testcase == reconnect_consumer_and_publ
                                             {queue_name, Q},
                                             {alt_queue_name, <<Q/binary, "_alt">>}
                                            ]),
-    Ret = rabbit_ct_helpers:run_steps(
-            Config2,
-            rabbit_ct_broker_helpers:setup_steps() ++
-            rabbit_ct_client_helpers:setup_steps()),
-    case Ret of
-        {skip, _} ->
-            Ret;
-        Config3 ->
-            EnableFF = rabbit_ct_broker_helpers:enable_feature_flag(
-                         Config3, quorum_queue),
-            case EnableFF of
-                ok ->
-                    Config3;
-                Skip ->
-                    end_per_testcase(Testcase, Config3),
-                    Skip
-            end
-    end;
+    rabbit_ct_helpers:run_steps(
+      Config2,
+      rabbit_ct_broker_helpers:setup_steps() ++
+      rabbit_ct_client_helpers:setup_steps());
 init_per_testcase(Testcase, Config) ->
     ClusterSize = ?config(rmq_nodes_count, Config),
     IsMixed = rabbit_ct_helpers:is_mixed_versions(),
@@ -308,15 +287,6 @@ init_per_testcase(Testcase, Config) ->
                                                     {alt_queue_name, <<Q/binary, "_alt">>},
                                                     {alt_2_queue_name, <<Q/binary, "_alt_2">>}
                                                    ]),
-            EnableFF = rabbit_ct_broker_helpers:enable_feature_flag(
-                         Config2, quorum_queue),
-            case EnableFF of
-                ok ->
-                    Config2;
-                Skip ->
-                    end_per_testcase(Testcase, Config2),
-                    Skip
-            end,
             rabbit_ct_helpers:run_steps(Config2, rabbit_ct_client_helpers:setup_steps())
     end.
 
@@ -703,6 +673,61 @@ vhost_with_quorum_queue_is_deleted(Config) ->
     undefined = rpc:call(Node, ra_directory, where_is, [quorum_queues, RaName]),
     ok.
 
+vhost_with_default_queue_type_declares_quorum_queue(Config) ->
+    Node = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+    VHost = atom_to_binary(?FUNCTION_NAME, utf8),
+    QName = atom_to_binary(?FUNCTION_NAME, utf8),
+    User = ?config(rmq_username, Config),
+
+    AddVhostArgs = [VHost, #{default_queue_type => <<"quorum">>}, User],
+    ok = rabbit_ct_broker_helpers:rpc(Config, Node, rabbit_vhost, add,
+                                      AddVhostArgs),
+    ok = rabbit_ct_broker_helpers:set_full_permissions(Config, User, VHost),
+    Conn = rabbit_ct_client_helpers:open_unmanaged_connection(Config, Node, VHost),
+    {ok, Ch} = amqp_connection:open_channel(Conn),
+    ?assertEqual({'queue.declare_ok', QName, 0, 0}, declare(Ch, QName, [])),
+    assert_queue_type(Node, VHost, QName, rabbit_quorum_queue),
+    %% declaring again without a queue arg is ok
+    ?assertEqual({'queue.declare_ok', QName, 0, 0}, declare(Ch, QName, [])),
+    %% also using an explicit queue type should be ok
+    ?assertEqual({'queue.declare_ok', QName, 0, 0},
+                 declare(Ch, QName, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
+    %% passive should work without x-queue-type
+    ?assertEqual({'queue.declare_ok', QName, 0, 0}, declare_passive(Ch, QName, [])),
+    %% passive with x-queue-type also should work
+    ?assertEqual({'queue.declare_ok', QName, 0, 0},
+                 declare_passive(Ch, QName, [{<<"x-queue-type">>, longstr, <<"quorum">>}])),
+
+    %% declaring an exclusive queue should declare a classic queue
+    QNameEx = iolist_to_binary([QName, <<"_exclusive">>]),
+    ?assertEqual({'queue.declare_ok', QNameEx, 0, 0},
+                 amqp_channel:call(Ch, #'queue.declare'{queue = QNameEx,
+                                                        exclusive = true,
+                                                        durable = true,
+                                                        arguments = []})),
+    assert_queue_type(Node, VHost, QNameEx, rabbit_classic_queue),
+
+    %% transient declares should also fall back to classic queues
+    QNameTr = iolist_to_binary([QName, <<"_transient">>]),
+    ?assertEqual({'queue.declare_ok', QNameTr, 0, 0},
+                 amqp_channel:call(Ch, #'queue.declare'{queue = QNameTr,
+                                                        exclusive = false,
+                                                        durable = false,
+                                                        arguments = []})),
+    assert_queue_type(Node, VHost, QNameTr, rabbit_classic_queue),
+
+    %% auto-delete declares should also fall back to classic queues
+    QNameAd = iolist_to_binary([QName, <<"_delete">>]),
+    ?assertEqual({'queue.declare_ok', QNameAd, 0, 0},
+                 amqp_channel:call(Ch, #'queue.declare'{queue = QNameAd,
+                                                        exclusive = false,
+                                                        auto_delete = true,
+                                                        durable = true,
+                                                        arguments = []})),
+    assert_queue_type(Node, VHost, QNameAd, rabbit_classic_queue),
+    amqp_connection:close(Conn),
+    ok.
+
 restart_all_types(Config) ->
     %% Test the node restart with both types of queues (quorum and classic) to
     %% ensure there are no regressions
@@ -1056,8 +1081,7 @@ invalid_policy(Config) ->
     Info = rpc:call(Server, rabbit_quorum_queue, infos,
                     [rabbit_misc:r(<<"/">>, queue, QQ)]),
     ?assertEqual('', proplists:get_value(policy, Info)),
-    ok = rabbit_ct_broker_helpers:clear_policy(Config, 0, <<"ha">>),
-    ok.
+    ok = rabbit_ct_broker_helpers:clear_policy(Config, 0, <<"ha">>).
 
 pre_existing_invalid_policy(Config) ->
     [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
@@ -1494,6 +1518,32 @@ cancel_sync_queue(Config) ->
     {error, _, _} =
         rabbit_ct_broker_helpers:rabbitmqctl(Config, 0, [<<"cancel_sync_queue">>, QQ]),
     ok.
+
+%% Test case for https://github.com/rabbitmq/rabbitmq-server/issues/5141
+%% Tests backwards compatibility in 3.9 / 3.8 mixed version cluster.
+%% Server 1 runs a version AFTER queue type interface got introduced.
+%% Server 2 runs a version BEFORE queue type interface got introduced.
+channel_handles_ra_event(Config) ->
+    Server1 = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+    Server2 = rabbit_ct_broker_helpers:get_node_config(Config, 1, nodename),
+    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server1),
+    Ch2 = rabbit_ct_client_helpers:open_channel(Config, Server2),
+    Q1 = ?config(queue_name, Config),
+    Q2 = ?config(alt_queue_name, Config),
+    ?assertMatch({'queue.declare_ok', Q1, 0, 0},
+                 declare(Ch2, Q1,
+                         [{<<"x-queue-type">>, longstr, <<"quorum">>},
+                          {<<"x-quorum-initial-group-size">>, long, 1}])),
+    ?assertMatch({'queue.declare_ok', Q2, 0, 0},
+                 declare(Ch2, Q2,
+                         [{<<"x-queue-type">>, longstr, <<"quorum">>},
+                          {<<"x-quorum-initial-group-size">>, long, 1}])),
+    publish(Ch1, Q1),
+    publish(Ch1, Q2),
+    wait_for_messages(Config, [[Q1, <<"1">>, <<"1">>, <<"0">>]]),
+    wait_for_messages(Config, [[Q2, <<"1">>, <<"1">>, <<"0">>]]),
+    ?assertEqual(1, consume(Ch1, Q1, false)),
+    ?assertEqual(2, consume(Ch1, Q2, false)).
 
 declare_during_node_down(Config) ->
     [Server, DownServer, _] = Servers = rabbit_ct_broker_helpers:get_node_configs(
@@ -2519,6 +2569,22 @@ per_message_ttl_mixed_expiry(Config) ->
     end,
     ok.
 
+per_message_ttl_expiration_too_high(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    MonitorRef = erlang:monitor(process, Ch),
+
+    ok =  amqp_channel:cast(Ch, #'basic.publish'{},
+                            #amqp_msg{props = #'P_basic'{expiration = integer_to_binary(10*365*24*60*60*1000+1)}}),
+    receive
+        {'DOWN', MonitorRef, process, Ch,
+         {shutdown, {server_initiated_close, 406, <<"PRECONDITION_FAILED - invalid expiration", _/binary>>}}} ->
+            ok
+    after 1000 ->
+              ct:fail("expected channel error")
+    end.
+
 consumer_metrics(Config) ->
     [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
 
@@ -2895,12 +2961,21 @@ declare(Ch, Q, Args) ->
                                            auto_delete = false,
                                            arguments = Args}).
 
+declare_passive(Ch, Q, Args) ->
+    amqp_channel:call(Ch, #'queue.declare'{queue = Q,
+                                           durable = true,
+                                           auto_delete = false,
+                                           passive = true,
+                                           arguments = Args}).
 assert_queue_type(Server, Q, Expected) ->
-    Actual = get_queue_type(Server, Q),
+    assert_queue_type(Server, <<"/">>, Q, Expected).
+
+assert_queue_type(Server, VHost, Q, Expected) ->
+    Actual = get_queue_type(Server, VHost, Q),
     Expected = Actual.
 
-get_queue_type(Server, Q0) ->
-    QNameRes = rabbit_misc:r(<<"/">>, queue, Q0),
+get_queue_type(Server, VHost, Q0) ->
+    QNameRes = rabbit_misc:r(VHost, queue, Q0),
     {ok, Q1} = rpc:call(Server, rabbit_amqqueue, lookup, [QNameRes]),
     amqqueue:get_type(Q1).
 

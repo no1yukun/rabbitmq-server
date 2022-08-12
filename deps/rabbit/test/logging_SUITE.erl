@@ -27,6 +27,8 @@
          logging_with_default_config_works/1,
          setting_log_levels_in_env_works/1,
          setting_log_levels_in_config_works/1,
+         setting_log_rotation_in_config_works/1,
+         setting_log_rotation_defaults_in_config_works/1,
          setting_log_levels_in_config_with_output_overridden_in_env_works/1,
          setting_message_format_works/1,
          setting_level_format_works/1,
@@ -49,6 +51,7 @@
          formatting_without_colors_works/1,
 
          logging_to_exchange_works/1,
+         update_log_exchange_config/1,
 
          logging_to_syslog_works/1]).
 
@@ -69,6 +72,8 @@ groups() ->
       [logging_with_default_config_works,
        setting_log_levels_in_env_works,
        setting_log_levels_in_config_works,
+       setting_log_rotation_in_config_works,
+       setting_log_rotation_defaults_in_config_works,
        setting_log_levels_in_config_with_output_overridden_in_env_works,
        setting_message_format_works,
        setting_level_format_works,
@@ -92,7 +97,8 @@ groups() ->
        formatting_without_colors_works]},
 
      {exchange_output, [],
-      [logging_to_exchange_works]},
+      [logging_to_exchange_works,
+       update_log_exchange_config]},
 
      {syslog_output, [],
       [logging_to_syslog_works]}
@@ -139,11 +145,8 @@ init_per_testcase(Testcase, Config) ->
         %% The exchange output requires RabbitMQ to run. All testcases in this
         %% group will run in the context of that RabbitMQ node.
         exchange_output ->
-            ExchProps = case Testcase of
-                            logging_to_exchange_works ->
-                                [{enabled, true},
-                                 {level, info}]
-                        end,
+            ExchProps = [{enabled, true},
+                         {level, info}] ,
             Config1 = rabbit_ct_helpers:set_config(
                         Config,
                         [{rmq_nodes_count, 1},
@@ -157,7 +160,7 @@ init_per_testcase(Testcase, Config) ->
               rabbit_ct_broker_helpers:setup_steps() ++
               rabbit_ct_client_helpers:setup_steps());
 
-        %% Other groups and testcases runs the tested code directly without a
+        %% Other groups and testcases run the tested code directly without a
         %% RabbitMQ node running.
         _ ->
             remove_all_handlers(),
@@ -383,6 +386,100 @@ setting_log_levels_in_config_works(Config) ->
                         #{domain => ?RMQLOG_DOMAIN_GLOBAL})),
     ok.
 
+setting_log_rotation_in_config_works(Config) ->
+    Context = default_context(Config),
+    ok = application:set_env(
+           rabbit, log,
+           [{file, [{date, "$D0"},
+                    {compress, true},
+                    {size, 100},
+                    {count, 1}
+                    ]},
+            {categories, [{queue, [{file, "queue.log"},
+                                   {rotate_on_date, "$D0"},
+                                   {compress_on_rotate, true},
+                                   {max_no_bytes, 200},
+                                   {max_no_files, 2}
+                                  ]}]}],
+           [{persistent, true}]),
+    rabbit_prelaunch_logging:clear_config_run_number(),
+    rabbit_prelaunch_logging:setup(Context),
+
+    Handlers = logger:get_handler_config(),
+    MainFileHandler = get_handler_by_id(Handlers, rmq_1_file_2),
+    MainFile = main_log_file_in_context(Context),
+    ?assertNotEqual(undefined, MainFileHandler),
+    ?assertMatch(
+       #{config := #{file := MainFile,
+                     type := file,
+                     rotate_on_date := "$D0",
+                     compress_on_rotate := true,
+                     max_no_bytes := 100,
+                     max_no_files := 1
+                    }},
+       MainFileHandler,
+      "rotation config present in the main handler"),
+
+    QueueFileHandler = get_handler_by_id(Handlers, rmq_1_file_1),
+    QueueFile = log_file_in_context(Context, "queue.log"),
+    ?assertNotEqual(undefined, QueueFileHandler),
+    ?assertMatch(
+       #{config := #{file := QueueFile,
+                     type := file,
+                     rotate_on_date := "$D0",
+                     compress_on_rotate := true,
+                     max_no_bytes := 200,
+                     max_no_files := 2
+                    }},
+       QueueFileHandler,
+      "rotation config present in the cat handler"),
+    ok.
+
+setting_log_rotation_defaults_in_config_works(Config) ->
+    Context = default_context(Config),
+    ok = application:set_env(
+           rabbit, log,
+           [{file, []},
+            {categories, [{queue, [{file, "queue.log"}]},
+                          {default, [{rotate_on_date, "$D0"},
+                                     {compress_on_rotate, true},
+                                     {max_no_bytes, 300},
+                                     {max_no_files, 3}
+                                    ]}]}],
+           [{persistent, true}]),
+    rabbit_prelaunch_logging:clear_config_run_number(),
+    rabbit_prelaunch_logging:setup(Context),
+
+    Handlers = logger:get_handler_config(),
+    MainFileHandler = get_handler_by_id(Handlers, rmq_1_file_2),
+    MainFile = main_log_file_in_context(Context),
+    ?assertNotEqual(undefined, MainFileHandler),
+    ?assertMatch(
+       #{config := #{file := MainFile,
+                     type := file,
+                     rotate_on_date := "$D0",
+                     compress_on_rotate := true,
+                     max_no_bytes := 300,
+                     max_no_files := 3
+                    }},
+       MainFileHandler,
+      "rotation config present in the main handler"),
+
+    QueueFileHandler = get_handler_by_id(Handlers, rmq_1_file_1),
+    QueueFile = log_file_in_context(Context, "queue.log"),
+    ?assertNotEqual(undefined, QueueFileHandler),
+    ?assertMatch(
+       #{config := #{file := QueueFile,
+                     type := file,
+                     rotate_on_date := "$D0",
+                     compress_on_rotate := true,
+                     max_no_bytes := 300,
+                     max_no_files := 3
+                    }},
+       QueueFileHandler,
+      "rotation config present in the queue handler"),
+    ok.
+
 setting_log_levels_in_config_with_output_overridden_in_env_works(Config) ->
     #{var_origins := Origins0} = Context0 = default_context(Config),
     Context = Context0#{main_log_file => "-",
@@ -435,6 +532,8 @@ setting_message_format_works(Config) ->
     Context = default_context(Config),
     Format = ["level=", level, " ",
               "md_key=", md_key, " ",
+              {md_key, ["known_md_key=", md_key], []}, " ",
+              {unknown_field, ["unknown_field=", unknown_field], ["unknown_field_spotted"]}, " ",
               "unknown_field=", unknown_field, " ",
               "msg=", msg],
     {PrefixFormat, LineFormat} =
@@ -453,9 +552,11 @@ setting_message_format_works(Config) ->
 
     RandomMsgBin = list_to_binary(RandomMsg),
     ?assertEqual(
-       <<"level=warn ",
+       <<"level=warning ",
          "md_key=md_value ",
-         "unknown_field=<unknown unknown_field> "
+         "known_md_key=md_value ",
+         "unknown_field_spotted ",
+         "unknown_field=<unknown unknown_field> ",
          "msg=", RandomMsgBin/binary>>,
        Line).
 
@@ -645,7 +746,7 @@ formatting_as_json_works(_, Context) ->
                  port => hd(erlang:ports()),
                  ref => erlang:make_ref()},
     {RandomMsg, Term} = log_and_return_json_object(
-                          Context, Metadata, [return_maps]),
+                          Context, Metadata),
 
     RandomMsgBin = list_to_binary(RandomMsg),
     ?assertMatch(#{time := _}, Term),
@@ -661,7 +762,7 @@ formatting_as_json_works(_, Context) ->
     ?assertMatch(#{float := 1.42}, Term),
     ?assertMatch(#{string := <<"string">>}, Term),
     ?assertMatch(#{list := [<<"s">>, <<"a">>, 3]}, Term),
-    ?assertMatch(#{map := #{key := <<"value">>}}, Term),
+    ?assertMatch(#{map := #{<<"key">> := <<"value">>}}, Term),
     ?assertMatch(#{function := FunBin}, Term),
     ?assertMatch(#{pid := PidBin}, Term),
     ?assertMatch(#{port := PortBin}, Term),
@@ -685,7 +786,7 @@ renaming_json_fields_works(Config) ->
                  integer => 1,
                  string => "string",
                  list => ["s", a, 3]},
-    {RandomMsg, Term} = log_and_return_json_object(Context, Metadata, [return_maps]),
+    {RandomMsg, Term} = log_and_return_json_object(Context, Metadata),
 
     RandomMsgBin = list_to_binary(RandomMsg),
     ?assertMatch(
@@ -711,7 +812,7 @@ removing_specific_json_fields_works(Config) ->
                  integer => 1,
                  string => "string",
                  list => ["s", a, 3]},
-    {RandomMsg, Term} = log_and_return_json_object(Context, Metadata, [return_maps]),
+    {RandomMsg, Term} = log_and_return_json_object(Context, Metadata),
 
     RandomMsgBin = list_to_binary(RandomMsg),
     ?assertMatch(
@@ -737,7 +838,7 @@ removing_non_mentionned_json_fields_works(Config) ->
                  integer => 1,
                  string => "string",
                  list => ["s", a, 3]},
-    {RandomMsg, Term} = log_and_return_json_object(Context, Metadata, [return_maps]),
+    {RandomMsg, Term} = log_and_return_json_object(Context, Metadata),
 
     RandomMsgBin = list_to_binary(RandomMsg),
     ?assertMatch(
@@ -763,7 +864,7 @@ configuring_verbosity_works(Config) ->
     rabbit_prelaunch_logging:clear_config_run_number(),
     rabbit_prelaunch_logging:setup(Context),
 
-    {RandomMsg, Term} = log_and_return_json_object(Context, #{}, [return_maps]),
+    {RandomMsg, Term} = log_and_return_json_object(Context, #{}),
 
     RandomMsgBin = list_to_binary(RandomMsg),
     ?assertMatch(
@@ -970,8 +1071,66 @@ logging_to_exchange_works(Config) ->
     ?assertNot(ping_log(rmq_1_file_2, info,
                         #{domain => ?RMQLOG_DOMAIN_GLOBAL}, Config)),
 
+    %% increase log level
+    ok = rabbit_ct_broker_helpers:rpc(
+           Config, 0,
+           rabbit_prelaunch_logging, set_log_level, [debug]),
+
+    ?assert(ping_log(rmq_1_exchange, debug, Config1)),
+    ?assert(ping_log(rmq_1_exchange, debug,
+                     #{domain => ?RMQLOG_DOMAIN_GLOBAL}, Config1)),
+
+    %% decrease log level
+    ok = rabbit_ct_broker_helpers:rpc(
+           Config, 0,
+           rabbit_prelaunch_logging, set_log_level, [error]),
+
+    ?assert(ping_log(rmq_1_exchange, error, Config1)),
+    ?assert(ping_log(rmq_1_exchange, error,
+                     #{domain => ?RMQLOG_DOMAIN_GLOBAL}, Config1)),
+
+    ?assertNot(ping_log(rmq_1_exchange, info, Config1)),
+
     amqp_channel:call(Chan, #'queue.delete'{queue = QName}),
     rabbit_ct_client_helpers:close_connection_and_channel(Conn, Chan),
+    ok.
+
+%% Logging configuration should be manipulated via RabbitMQ.
+%% Still if someone would modify log exchange config directly via the
+%% OTP logger API, that should work too.
+update_log_exchange_config(Config) ->
+    {ok, OrigHandlerConfig} =
+        rabbit_ct_broker_helpers:rpc(
+          Config, 0,
+          logger, get_handler_config, [rmq_1_exchange]),
+
+    ok = rabbit_ct_broker_helpers:rpc(
+          Config, 0,
+          logger, update_formatter_config, [rmq_1_exchange, #{use_colors => true}]),
+    {ok, HandlerConfig1} =
+        rabbit_ct_broker_helpers:rpc(
+          Config, 0,
+          logger, get_handler_config, [rmq_1_exchange]),
+
+    %% use_colors config changed from false to true
+    ?assertMatch(#{formatter := {_, #{use_colors := false}}}, OrigHandlerConfig),
+    ?assertMatch(#{formatter := {_, #{use_colors := true}}}, HandlerConfig1),
+    %% no other formatter config changed
+    ?assertEqual(
+       maps:without([use_colors], element(2, maps:get(formatter, OrigHandlerConfig))),
+       maps:without([use_colors], element(2, maps:get(formatter, HandlerConfig1)))),
+    %% no other handler config changed
+    ?assertEqual(
+       maps:without([formatter], OrigHandlerConfig),
+       maps:without([formatter], HandlerConfig1)),
+
+    %% should not be possible to change exchange resource or setup_proc in config
+    logger:update_handler_config(rmq_1_exchange, config, #{exchange => "foo", setup_proc => self()}),
+    {ok, HandlerConfig2} =
+        rabbit_ct_broker_helpers:rpc(
+          Config, 0,
+          logger, get_handler_config, [rmq_1_exchange]),
+    ?assertEqual(HandlerConfig1, HandlerConfig2),
     ok.
 
 logging_to_syslog_works(Config) ->
@@ -1049,6 +1208,9 @@ main_log_file_in_context(#{log_base_dir := LogBaseDir,
 upgrade_log_file_in_context(#{log_base_dir := LogBaseDir,
                               upgrade_log_file := UpgradeLogFile}) ->
     filename:join(LogBaseDir, UpgradeLogFile).
+
+log_file_in_context(#{log_base_dir := LogBaseDir}, FileName) ->
+    filename:join(LogBaseDir, FileName).
 
 get_handler_by_id([#{id := Id} = Handler | _], Id) ->
     Handler;
@@ -1210,7 +1372,7 @@ log_and_return_line(Context, Metadata) ->
                         ReOpts),
     {RandomMsg, Line}.
 
-log_and_return_json_object(Context, Metadata, DecodeOpts) ->
+log_and_return_json_object(Context, Metadata) ->
     RandomMsg = get_random_string(
                   32,
                   "abcdefghijklmnopqrstuvwxyz"
@@ -1225,7 +1387,9 @@ log_and_return_json_object(Context, Metadata, DecodeOpts) ->
                         Content,
                         "^.+\"" ++ RandomMsg ++ "\".+$",
                         ReOpts),
-    Term = jsx:decode(Line, [{labels, attempt_atom} | DecodeOpts]),
+
+    Term0 = rabbit_json:decode(Line),
+    Term = rabbit_data_coercion:atomize_keys(Term0),
 
     {RandomMsg, Term}.
 

@@ -1,5 +1,4 @@
-load("@rules_erlang//:erlc.bzl", "erlc")
-load("@rules_erlang//:xref.bzl", "xref")
+load("@rules_erlang//:xref2.bzl", "xref")
 load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
 load("//:rabbitmq_home.bzl", "rabbitmq_home")
 load("//:rabbitmq_run.bzl", "rabbitmq_run")
@@ -7,11 +6,11 @@ load(
     "//:rabbitmq.bzl",
     "BROKER_VERSION_REQUIREMENTS_ANY",
     "RABBITMQ_DIALYZER_OPTS",
-    "RABBITMQ_TEST_ERLC_OPTS",
     "assert_suites",
     "rabbitmq_app",
     "rabbitmq_integration_suite",
     "rabbitmq_suite",
+    "rabbitmq_test_helper",
 )
 
 APP_NAME = "rabbitmq_shovel"
@@ -41,11 +40,11 @@ BUILD_DEPS = [
 DEPS = [
     "//deps/amqp_client:erlang_app",
     "//deps/rabbit_common:erlang_app",
+    "//deps/rabbit:erlang_app",
 ]
 
 RUNTIME_DEPS = [
     "//deps/amqp10_client:erlang_app",
-    "//deps/rabbit:erlang_app",
 ]
 
 rabbitmq_app(
@@ -60,7 +59,9 @@ rabbitmq_app(
     deps = DEPS,
 )
 
-xref(tags = ["xref"])
+xref(
+    additional_libs = BUILD_DEPS,
+)
 
 plt(
     name = "base_plt",
@@ -70,7 +71,6 @@ plt(
 dialyze(
     dialyzer_opts = RABBITMQ_DIALYZER_OPTS + ["-Wno_undefined_callbacks"],
     plt = ":base_plt",
-    tags = ["dialyze"],
 )
 
 rabbitmq_home(
@@ -87,14 +87,11 @@ rabbitmq_run(
     home = ":broker-for-tests-home",
 )
 
-erlc(
+rabbitmq_test_helper(
     name = "shovel_test_utils",
-    testonly = True,
     srcs = [
         "test/shovel_test_utils.erl",
     ],
-    dest = "test",
-    erlc_opts = RABBITMQ_TEST_ERLC_OPTS,
 )
 
 PACKAGE = "deps/rabbitmq_shovel"

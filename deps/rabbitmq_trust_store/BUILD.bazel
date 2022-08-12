@@ -1,4 +1,4 @@
-load("@rules_erlang//:xref.bzl", "xref")
+load("@rules_erlang//:xref2.bzl", "xref")
 load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
 load("//:rabbitmq_home.bzl", "rabbitmq_home")
 load("//:rabbitmq_run.bzl", "rabbitmq_run")
@@ -45,7 +45,7 @@ rabbitmq_app(
     deps = DEPS,
 )
 
-xref(tags = ["xref"])
+xref()
 
 plt(
     name = "base_plt",
@@ -57,7 +57,6 @@ plt(
 dialyze(
     dialyzer_opts = RABBITMQ_DIALYZER_OPTS,
     plt = ":base_plt",
-    tags = ["dialyze"],
     warnings_as_errors = False,
 )
 
@@ -88,8 +87,8 @@ suites = [
         name = "system_SUITE",
         flaky = True,
         runtime_deps = [
+            "//deps/trust_store_http:erlang_app",
             "@ct_helper//:erlang_app",
-            "@trust_store_http//:erlang_app",
         ],
     ),
 ]
